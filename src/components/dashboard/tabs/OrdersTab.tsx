@@ -15,12 +15,14 @@ import {
 import BulkActionPanel from "../BulkActionPanel";
 import DateRangeSelector from "../DateRangeSelector";
 import { exportStyledPdfReport } from "../pdfExport";
-import type { DateRange, Order } from "../types";
+import type { DateRange, Order, Product } from "../types";
 import { formatCurrency, formatDisplayDate } from "../utils";
+import * as XLSX from "xlsx";
 
 interface OrdersTabProps {
   orders: Order[];
   filteredOrders: Order[];
+  products?: Product[];
   loading: boolean;
   searchTerm: string;
   filterStatus: string;
@@ -47,6 +49,7 @@ interface OrdersTabProps {
 }
 
 const ITEMS_PER_PAGE = 20;
+const MAX_VISIBLE_PRODUCT_CHIPS = 2;
 
 const escapeHtml = (value: string | number | undefined | null) =>
   String(value ?? "")
@@ -56,10 +59,168 @@ const escapeHtml = (value: string | number | undefined | null) =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
+const parseJsonArray = (value: string): unknown[] | null => {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeNames = (value: unknown) => {
+  const rawValues =
+    Array.isArray(value)
+      ? value
+      : typeof value === "number"
+        ? [value]
+        : typeof value === "string"
+          ? parseJsonArray(value.trim()) ??
+            (value.includes("||") ? value.split("||") : value.split(","))
+          : [];
+
+  return Array.from(
+    new Set(
+      rawValues
+        .map((entry) => String(entry ?? "").trim())
+        .filter((entry) => {
+          const normalized = entry.toLowerCase();
+          return Boolean(normalized) && normalized !== "null" && normalized !== "undefined";
+        }),
+    ),
+  );
+};
+
+const normalizeIds = (value: unknown) => {
+  const rawValues =
+    Array.isArray(value)
+      ? value
+      : typeof value === "number"
+        ? [value]
+        : typeof value === "string"
+          ? parseJsonArray(value.trim()) ?? value.split(",")
+          : [];
+
+  return Array.from(
+    new Set(
+      rawValues
+        .map((entry) => Number(entry))
+        .filter((entry) => Number.isInteger(entry) && entry > 0),
+    ),
+  );
+};
+
+const mergeIds = (...values: unknown[]) =>
+  Array.from(
+    new Set(
+      values.reduce<number[]>((allIds, value) => [...allIds, ...normalizeIds(value)], []),
+    ),
+  );
+
+const withIdFallback = (names: string[], ids: number[], prefix: string) =>
+  names.length > 0 ? names : ids.map((id) => `${prefix} #${id}`);
+
+interface ProductEntry {
+  label: string;
+  serialNumber: string;
+}
+
+const parseSerialList = (value: unknown) => normalizeNames(value);
+
+const buildOrderProductEntries = (
+  order: Order,
+  products: Product[],
+  isReplacement: boolean,
+): ProductEntry[] => {
+  const ids = isReplacement
+    ? mergeIds(order.replacement_product_ids, order.replacement_product_id)
+    : mergeIds(order.product_ids, order.product_id);
+  const namesFromList = isReplacement ? normalizeNames(order.replacement_product_names) : normalizeNames(order.product_names);
+  const fallbackNames = isReplacement ? normalizeNames(order.replacement_product_name) : normalizeNames(order.product_name);
+  const names = namesFromList.length > 0 ? namesFromList : fallbackNames;
+  const serialsFromList = parseSerialList(
+    isReplacement ? order.replacement_product_serial_numbers : order.product_serial_numbers,
+  );
+  const fallbackSerial = (isReplacement ? order.replacement_serial_number : order.serial_number) || "";
+
+  const idEntries = ids.map((id, index) => {
+    const matched = products.find((product) => product.id === id);
+    const label = names[index] || matched?.product_name || `${isReplacement ? "Replacement Product" : "Product"} #${id}`;
+    const serialNumber = serialsFromList[index] || matched?.serial_number || (index === 0 ? fallbackSerial : "") || "";
+    return { label, serialNumber };
+  });
+
+  if (idEntries.length > 0) return idEntries;
+
+  return withIdFallback(names, ids, isReplacement ? "Replacement Product" : "Product").map((label, index) => ({
+    label,
+    serialNumber: serialsFromList[index] || (index === 0 ? fallbackSerial : "") || "",
+  }));
+};
+
+const getOrderProductEntries = (order: Order, products: Product[]) => {
+  const entries = buildOrderProductEntries(order, products, false);
+  return entries.length > 0 ? entries : [{ label: "Not added", serialNumber: "" }];
+};
+
+const getOrderReplacementEntries = (order: Order, products: Product[]) => {
+  return buildOrderProductEntries(order, products, true);
+};
+
+const formatProductEntry = (entry: ProductEntry) =>
+  entry.serialNumber ? `${entry.label} (SN: ${entry.serialNumber})` : entry.label;
+
+const formatProductEntryList = (entries: ProductEntry[], fallback: string) =>
+  entries.length > 0 ? entries.map(formatProductEntry).join(", ") : fallback;
+
+const renderOrderProductChips = (entries: ProductEntry[], emptyLabel: string) => {
+  if (!entries.length) {
+    return <span className="product-empty">{emptyLabel}</span>;
+  }
+
+  const visibleEntries = entries.slice(0, MAX_VISIBLE_PRODUCT_CHIPS);
+  const hiddenCount = entries.length - visibleEntries.length;
+
+  return (
+    <div className="order-product-stack" title={entries.map((entry) => entry.label).join(", ")}>
+      <div className="order-product-chips">
+        {visibleEntries.map((entry, index) => (
+          <span key={`${entry.label}-${index}`} className="product-chip">
+            {index + 1}. {entry.label}
+          </span>
+        ))}
+        {hiddenCount > 0 && <span className="product-chip more">+{hiddenCount} more</span>}
+      </div>
+      <span className="order-product-count">
+        {entries.length} item{entries.length > 1 ? "s" : ""}
+      </span>
+    </div>
+  );
+};
+
+const getPendingDays = (createdAt?: string) => {
+  if (!createdAt) return 0;
+  const createdDate = new Date(createdAt);
+  if (Number.isNaN(createdDate.getTime())) return 0;
+  const now = new Date();
+  const msPerDay = 1000 * 60 * 60 * 24;
+  return Math.max(0, Math.floor((now.getTime() - createdDate.getTime()) / msPerDay));
+};
+
+const getPendingLabel = (order: Order) => {
+  const normalizedStatus = String(order.status || "").toLowerCase();
+  if (normalizedStatus === "delivered") {
+    return "Delivered";
+  }
+  const days = getPendingDays(order.created_at);
+  return `${days} day${days === 1 ? "" : "s"} pending`;
+};
+
 const OrdersTab = (props: OrdersTabProps) => {
   const {
     orders,
     filteredOrders,
+    products = [],
     loading,
     searchTerm,
     filterStatus,
@@ -93,6 +254,7 @@ const OrdersTab = (props: OrdersTabProps) => {
   const paginatedOrders = filteredOrders.slice(pageStartIndex, pageStartIndex + ITEMS_PER_PAGE);
   const selectedOrders = filteredOrders.filter((order) => selectedOrderIds.includes(order.id));
   const bulkOrders = selectedOrders.length > 0 ? selectedOrders : filteredOrders;
+  const excelOrders = selectedOrders.length > 0 ? selectedOrders : orders;
   const allPageSelected =
     paginatedOrders.length > 0 && paginatedOrders.every((order) => selectedOrderIds.includes(order.id));
 
@@ -133,65 +295,49 @@ const OrdersTab = (props: OrdersTabProps) => {
     setSelectedOrderIds([]);
   };
 
-  const downloadFile = (content: string, filename: string, type: string) => {
-    const blob = new Blob([content], { type });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
-  };
+  const exportOrdersToExcel = () => {
+    if (excelOrders.length === 0) return;
 
-  const exportOrdersToCSV = () => {
-    if (bulkOrders.length === 0) return;
+    const excelData = excelOrders.map((order) => {
+      const productEntries = getOrderProductEntries(order, products);
+      const replacementEntries = getOrderReplacementEntries(order, products);
+      const finalAmount = Number(order.final_cost || order.estimated_cost || 0);
+      const deposit = Number(order.deposit_amount || 0);
+      const balanceDue = Math.max(finalAmount - deposit, 0);
 
-    const header = [
-      "Order Code",
-      "Created Date",
-      "Client",
-      "Phone",
-      "Product",
-      "Issue",
-      "Staff",
-      "Warranty",
-      "Delivery Date",
-      "Status",
-      "Estimated Cost",
-      "Final Cost",
-      "Deposit",
-      "Payment Status",
-      "Priority",
-    ];
+      return {
+        "Order Code": order.order_code,
+        "Created Date": formatDisplayDate(order.created_at),
+        "Updated Date": formatDisplayDate((order as unknown as { updated_at?: string }).updated_at || ""),
+        Client: order.client_name,
+        Phone: order.client_phone,
+        Email: order.client_email || "N/A",
+        "Main Products": formatProductEntryList(productEntries, "Not added"),
+        "Replacement Products": formatProductEntryList(replacementEntries, "No replacement"),
+        Issue: order.issue_description,
+        "Diagnosis Notes": order.diagnosis_notes || "",
+        "Repair Notes": order.repair_notes || "",
+        Notes: order.notes || "",
+        Staff: order.staff_name || "Not assigned",
+        "Service Type": order.service_type || "general",
+        Warranty: order.warranty_status?.replaceAll("_", " ") || "N/A",
+        "Estimated Delivery": formatDisplayDate(order.estimated_delivery_date),
+        "Actual Delivery": formatDisplayDate(order.actual_delivery_date || ""),
+        Status: order.status,
+        Priority: order.priority,
+        "Payment Method": (order as unknown as { payment_method?: string }).payment_method || "N/A",
+        "Estimated Cost": formatCurrency(order.estimated_cost),
+        "Final Cost": formatCurrency(order.final_cost || order.estimated_cost),
+        Deposit: formatCurrency(order.deposit_amount),
+        "Balance Due": formatCurrency(balanceDue),
+        "Payment Status": order.payment_status,
+      };
+    });
 
-    const rows = bulkOrders.map((order) =>
-      [
-        order.order_code,
-        formatDisplayDate(order.created_at),
-        order.client_name,
-        order.client_phone,
-        order.product_name,
-        order.issue_description,
-        order.staff_name || "Not assigned",
-        order.warranty_status?.replaceAll("_", " ") || "N/A",
-        formatDisplayDate(order.estimated_delivery_date),
-        order.status,
-        formatCurrency(order.estimated_cost),
-        formatCurrency(order.final_cost || order.estimated_cost),
-        formatCurrency(order.deposit_amount),
-        order.payment_status,
-        order.priority,
-      ]
-        .map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`)
-        .join(","),
-    );
-
-    downloadFile(
-      `\uFEFF${header.join(",")}\n${rows.join("\n")}`,
-      `service_orders_${new Date().toISOString().split("T")[0]}.csv`,
-      "text/csv;charset=utf-8;",
-    );
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Service Orders");
+    XLSX.writeFile(workbook, `service_orders_${new Date().toISOString().split("T")[0]}.xlsx`);
   };
 
   const exportOrdersToPDF = () => {
@@ -210,38 +356,62 @@ const OrdersTab = (props: OrdersTabProps) => {
     exportStyledPdfReport({
       filename: `service_orders_${new Date().toISOString().split("T")[0]}.pdf`,
       title: "Service Orders Report",
-      subtitle: "Repair jobs, client details, delivery timelines, and payment overview.",
+      subtitle: "Complete service order export including product/replacement lists, serials, workflow, notes, and payment details.",
       scopeLabel:
         selectedOrders.length > 0
           ? `${selectedOrders.length} selected orders`
           : `${filteredOrders.length} filtered orders`,
       accentColor: "#2563eb",
+      orientation: "landscape",
       metrics: [
         { label: "Included", value: `${bulkOrders.length} orders` },
         { label: "Collection", value: `Rs. ${formatCurrency(totalValue)}` },
         { label: "Closed", value: `${closedOrders}` },
         { label: "Payment Pending", value: `${unpaidOrders}` },
       ],
-      head: [["Order", "Client", "Product", "Status", "Priority", "Delivery", "Amount", "Payment"]],
-      body: bulkOrders.map((order) => [
-        order.order_code,
-        `${order.client_name}\n${order.client_phone}`,
-        order.product_name,
-        order.status,
-        order.priority,
-        formatDisplayDate(order.estimated_delivery_date),
-        `Rs. ${formatCurrency(order.final_cost || order.estimated_cost)}`,
-        order.payment_status,
-      ]),
+      head: [[
+        "Order",
+        "Client",
+        "Main Products",
+        "Replacement Products",
+        "Issue / Notes",
+        "Status / Priority",
+        "Timeline",
+        "Staff",
+        "Payment",
+      ]],
+      body: bulkOrders.map((order) => {
+        const productEntries = getOrderProductEntries(order, products);
+        const replacementEntries = getOrderReplacementEntries(order, products);
+        const issueText = [order.issue_description, order.diagnosis_notes, order.repair_notes, order.notes]
+          .filter((value) => Boolean(String(value || "").trim()))
+          .join("\n");
+        const finalAmount = Number(order.final_cost || order.estimated_cost || 0);
+        const deposit = Number(order.deposit_amount || 0);
+        const balanceDue = Math.max(finalAmount - deposit, 0);
+
+        return [
+          `${order.order_code}\nCreated: ${formatDisplayDate(order.created_at)}`,
+          `${order.client_name}\n${order.client_phone || "N/A"}\n${order.client_email || "N/A"}`,
+          formatProductEntryList(productEntries, "Not added"),
+          formatProductEntryList(replacementEntries, "No replacement"),
+          issueText || "N/A",
+          `${order.status} | ${order.priority}\nWarranty: ${order.warranty_status || "N/A"}`,
+          `Est: ${formatDisplayDate(order.estimated_delivery_date)}\nAct: ${formatDisplayDate(order.actual_delivery_date || "")}`,
+          order.staff_name || "Not assigned",
+          `Estimated: Rs. ${formatCurrency(order.estimated_cost)}\nFinal: Rs. ${formatCurrency(order.final_cost || order.estimated_cost)}\nDeposit: Rs. ${formatCurrency(order.deposit_amount)}\nBalance: Rs. ${formatCurrency(balanceDue)}\nStatus: ${order.payment_status}`,
+        ];
+      }),
       columnStyles: {
-        0: { cellWidth: 24 },
-        1: { cellWidth: 48 },
-        2: { cellWidth: 58 },
-        3: { cellWidth: 24 },
-        4: { cellWidth: 22 },
+        0: { cellWidth: 28 },
+        1: { cellWidth: 36 },
+        2: { cellWidth: 44 },
+        3: { cellWidth: 44 },
+        4: { cellWidth: 46 },
         5: { cellWidth: 28 },
-        6: { cellWidth: 26, halign: "right" },
-        7: { cellWidth: 28 },
+        6: { cellWidth: 30 },
+        7: { cellWidth: 24 },
+        8: { cellWidth: 36 },
       },
     });
   };
@@ -249,23 +419,30 @@ const OrdersTab = (props: OrdersTabProps) => {
   const printOrders = () => {
     if (bulkOrders.length === 0) return;
 
-    const printWindow = window.open("", "_blank", "width=1200,height=900");
+    const printWindow = window.open("", "_blank", "width=1400,height=960");
     if (!printWindow) return;
 
     const rows = bulkOrders
-      .map(
-        (order) => `
+      .map((order) => {
+        const productEntries = getOrderProductEntries(order, products);
+        const replacementEntries = getOrderReplacementEntries(order, products);
+        const finalAmount = Number(order.final_cost || order.estimated_cost || 0);
+        const deposit = Number(order.deposit_amount || 0);
+        const balanceDue = Math.max(finalAmount - deposit, 0);
+
+        return `
           <tr>
-            <td>${escapeHtml(order.order_code)}</td>
-            <td>${escapeHtml(order.client_name)}<br /><small>${escapeHtml(order.client_phone)}</small></td>
-            <td>${escapeHtml(order.product_name)}</td>
-            <td>${escapeHtml(order.staff_name || "Not assigned")}</td>
-            <td>${escapeHtml(order.status)}</td>
-            <td>${escapeHtml(order.priority)}</td>
-            <td>${escapeHtml(formatDisplayDate(order.estimated_delivery_date))}</td>
-            <td>Rs. ${escapeHtml(formatCurrency(order.final_cost || order.estimated_cost))}</td>
-          </tr>`,
-      )
+            <td>${escapeHtml(order.order_code)}<br /><small>${escapeHtml(formatDisplayDate(order.created_at))}</small></td>
+            <td>${escapeHtml(order.client_name)}<br /><small>${escapeHtml(order.client_phone)}</small><br /><small>${escapeHtml(order.client_email || "N/A")}</small></td>
+            <td>${escapeHtml(formatProductEntryList(productEntries, "Not added"))}</td>
+            <td>${escapeHtml(formatProductEntryList(replacementEntries, "No replacement"))}</td>
+            <td>${escapeHtml(order.issue_description || "N/A")}<br /><small>${escapeHtml(order.notes || "")}</small></td>
+            <td>${escapeHtml(order.staff_name || "Not assigned")}<br /><small>${escapeHtml(order.service_type || "general")}</small></td>
+            <td>${escapeHtml(order.status)}<br /><small>${escapeHtml(order.priority)}</small><br /><small>${escapeHtml(order.warranty_status || "N/A")}</small></td>
+            <td>Est: ${escapeHtml(formatDisplayDate(order.estimated_delivery_date))}<br /><small>Act: ${escapeHtml(formatDisplayDate(order.actual_delivery_date || ""))}</small></td>
+            <td>Estimated: Rs. ${escapeHtml(formatCurrency(order.estimated_cost))}<br />Final: Rs. ${escapeHtml(formatCurrency(order.final_cost || order.estimated_cost))}<br />Deposit: Rs. ${escapeHtml(formatCurrency(order.deposit_amount))}<br /><strong>Balance: Rs. ${escapeHtml(formatCurrency(balanceDue))}</strong><br /><small>${escapeHtml(order.payment_status)}</small></td>
+          </tr>`;
+      })
       .join("");
 
     printWindow.document.write(`
@@ -278,8 +455,8 @@ const OrdersTab = (props: OrdersTabProps) => {
             .header { margin-bottom: 20px; }
             .header h1 { margin: 0 0 6px; color: #1d4ed8; }
             .header p { margin: 0; color: #475569; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th, td { border: 1px solid #cbd5e1; padding: 10px; text-align: left; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; table-layout: fixed; }
+            th, td { border: 1px solid #cbd5e1; padding: 8px; text-align: left; font-size: 11px; vertical-align: top; word-break: break-word; }
             th { background: #eff6ff; color: #1e3a8a; }
             tr:nth-child(even) { background: #f8fafc; }
             small { color: #64748b; }
@@ -301,12 +478,13 @@ const OrdersTab = (props: OrdersTabProps) => {
               <tr>
                 <th>Order</th>
                 <th>Client</th>
-                <th>Product</th>
-                <th>Staff</th>
+                <th>Main Products</th>
+                <th>Replacement</th>
+                <th>Issue / Notes</th>
+                <th>Staff / Service</th>
                 <th>Status</th>
-                <th>Priority</th>
-                <th>Delivery</th>
-                <th>Amount</th>
+                <th>Timeline</th>
+                <th>Payment</th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
@@ -319,6 +497,7 @@ const OrdersTab = (props: OrdersTabProps) => {
     printWindow.print();
     printWindow.close();
   };
+
 
   return (
     <div className="orders-section">
@@ -392,11 +571,11 @@ const OrdersTab = (props: OrdersTabProps) => {
         filteredCount={filteredOrders.length}
         totalPages={totalPages}
         itemsPerPage={ITEMS_PER_PAGE}
-        helperText="Export and print use selected rows first. If nothing is selected, all filtered orders are used."
+        helperText="Excel export uses selected rows first. If nothing is selected, it exports full order data."
         receiptHint="Use the receipt button in any order row to preview and download the receipt PDF."
         onSelectAll={selectAllFilteredOrders}
         onClearSelection={clearSelection}
-        onExportCSV={exportOrdersToCSV}
+        onExportCSV={exportOrdersToExcel}
         onExportPDF={exportOrdersToPDF}
         onPrint={printOrders}
         disableSelectAll={filteredOrders.length === 0}
@@ -430,6 +609,7 @@ const OrdersTab = (props: OrdersTabProps) => {
                 <th>Staff</th>
                 <th>Warranty</th>
                 <th>Status</th>
+                <th>Pending Days</th>
                 <th>Payment Status</th>
                 <th>Priority</th>
                 <th>Actions</th>
@@ -438,6 +618,8 @@ const OrdersTab = (props: OrdersTabProps) => {
             <tbody>
               {paginatedOrders.map((order, index) => {
                 const isSelected = selectedOrderIds.includes(order.id);
+                const productEntries = getOrderProductEntries(order, products);
+                const replacementEntries = getOrderReplacementEntries(order, products);
 
                 return (
                   <motion.tr
@@ -465,15 +647,15 @@ const OrdersTab = (props: OrdersTabProps) => {
                       </div>
                     </td>
                     <td>
-                      <div className="product-cell">
+                      <div className="product-cell order-products-cell">
                         <FiPackage className="product-icon" />
-                        <span>{order.product_name}</span>
+                        {renderOrderProductChips(productEntries, "Not added")}
                       </div>
                     </td>
                     <td>
-                      <div className="product-cell">
+                      <div className="product-cell order-products-cell">
                         <FiPackage className="product-icon" />
-                        <span>{order.replacement_product_name || "No replacement"}</span>
+                        {renderOrderProductChips(replacementEntries, "No replacement")}
                       </div>
                     </td>
                     <td>
@@ -507,6 +689,15 @@ const OrdersTab = (props: OrdersTabProps) => {
                         <div className="status-indicator" style={{ backgroundColor: getStatusColor(order.status) }}></div>
                         <span className="status-label">{order.status === "ready" ? "Ready" : order.status}</span>
                       </div>
+                    </td>
+                    <td>
+                      <span
+                        className={`pending-days-badge ${
+                          String(order.status || "").toLowerCase() === "delivered" ? "is-delivered" : "is-pending"
+                        }`}
+                      >
+                        {getPendingLabel(order)}
+                      </span>
                     </td>
                     <td>
                       <span className={`payment-status ${order.payment_status}`}>{order.payment_status}</span>

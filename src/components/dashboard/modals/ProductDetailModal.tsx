@@ -32,7 +32,9 @@ const formatLabel = (value?: string) =>
 
 const ProductDetailModal = ({ product, relatedOrders, onClose, onEdit }: ProductDetailModalProps) => {
   const isSpareProduct = Boolean(Number(product.is_spare_product || 0));
-  const recentOrders = relatedOrders.slice(0, 5);
+  const recentOrders = [...relatedOrders]
+    .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+    .slice(0, 5);
 
   return (
     <motion.div
@@ -107,7 +109,9 @@ const ProductDetailModal = ({ product, relatedOrders, onClose, onEdit }: Product
               <div>
                 <span className="order-detail-hero-label">Created</span>
                 <strong>{formatDisplayDate(product.created_at)}</strong>
-                <p>{product.purchase_date ? `Purchased ${formatDisplayDate(product.purchase_date)}` : "Purchase date not set"}</p>
+                <p>
+                  {product.purchase_date ? `Purchased ${formatDisplayDate(product.purchase_date)}` : "Purchase date not set"} • {relatedOrders.length} linked orders
+                </p>
               </div>
             </div>
           </div>

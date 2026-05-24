@@ -63,6 +63,7 @@ import {
   createOrderReceiptMarkup,
   downloadReceiptPdf,
 } from "./dashboard/receiptUtils";
+import { expandProductNameSerialPairs } from "./dashboard/productBatch";
 import { formatCurrency, formatDisplayDate, formatISODate } from "./dashboard/utils";
 
 const API_BASE_URL = "http://localhost/sun_computers/api";
@@ -85,6 +86,8 @@ const createDefaultOrderForm = (): OrderForm => ({
   client_id: "",
   product_id: "",
   replacement_product_id: "",
+  product_ids: [],
+  replacement_product_ids: [],
   staff_id: "",
   deposit_amount: "",
 });
@@ -118,6 +121,100 @@ const createDefaultProductForm = (): ProductForm => ({
 type ReceiptTarget =
   | { kind: "order"; order: Order }
   | { kind: "delivery"; delivery: Delivery };
+
+const parseJsonArray = (value: string): unknown[] | null => {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeNumericList = (value: unknown): number[] => {
+  let rawList: unknown[] = [];
+
+  if (Array.isArray(value)) {
+    rawList = value;
+  } else if (typeof value === "number") {
+    rawList = [value];
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    rawList = parseJsonArray(trimmed) ?? trimmed.split(",");
+  }
+
+  return Array.from(
+    new Set(
+      rawList
+        .map((entry) => Number(entry))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ),
+  );
+};
+
+const normalizeNameList = (value: unknown): string[] => {
+  let rawList: unknown[] = [];
+
+  if (Array.isArray(value)) {
+    rawList = value;
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    rawList =
+      parseJsonArray(trimmed) ??
+      (trimmed.includes("||") ? trimmed.split("||") : trimmed.split(","));
+  }
+
+  return Array.from(
+    new Set(
+      rawList
+        .map((entry) => String(entry ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+};
+
+const normalizeOrderForUi = (order: Order): Order => {
+  const fallbackPrimaryId = normalizeNumericList(order.product_id)[0];
+  const fallbackReplacementId = normalizeNumericList(order.replacement_product_id)[0];
+  const productIds = Array.from(
+    new Set([
+      ...normalizeNumericList(order.product_ids),
+      ...(typeof fallbackPrimaryId === "number" ? [fallbackPrimaryId] : []),
+    ]),
+  );
+  const replacementProductIds = Array.from(
+    new Set([
+      ...normalizeNumericList(order.replacement_product_ids),
+      ...(typeof fallbackReplacementId === "number" ? [fallbackReplacementId] : []),
+    ]),
+  );
+  const productNamesFromList = normalizeNameList(order.product_names);
+  const replacementNamesFromList = normalizeNameList(order.replacement_product_names);
+  const productNames =
+    productNamesFromList.length > 0
+      ? productNamesFromList
+      : normalizeNameList(order.product_name);
+  const replacementProductNames =
+    replacementNamesFromList.length > 0
+      ? replacementNamesFromList
+      : normalizeNameList(order.replacement_product_name);
+
+  return {
+    ...order,
+    product_id: productIds[0] ?? fallbackPrimaryId ?? 0,
+    product_ids: productIds,
+    product_name: productNames[0] || order.product_name || "",
+    product_names: productNames,
+    replacement_product_id:
+      replacementProductIds[0] ?? fallbackReplacementId ?? null,
+    replacement_product_ids: replacementProductIds,
+    replacement_product_name:
+      replacementProductNames[0] || order.replacement_product_name || "",
+    replacement_product_names: replacementProductNames,
+  };
+};
 
 const Dashboard = ({ onLogout }: DashboardProps) => {
   const [user, setUser] = useState<User>({
@@ -339,7 +436,7 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
       if (!response || !response.ok) throw new Error("Failed to load orders");
       const data: ApiResponse = await response.json();
       if (!data.success) throw new Error(data.message || "Failed to load orders");
-      setOrders(data.orders || []);
+      setOrders(((data.orders || []) as Order[]).map(normalizeOrderForUi));
     } catch (err) {
       setError(`Failed to load orders: ${(err as Error).message}`);
     } finally {
@@ -359,7 +456,11 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
       if (!response || !response.ok) throw new Error("Failed to load replacement orders");
       const data: ApiResponse = await response.json();
       if (!data.success) throw new Error(data.message || "Failed to load replacement orders");
-      setReplacementOrders(data.orders || data.replacementOrders || []);
+      setReplacementOrders(
+        ((data.orders || data.replacementOrders || []) as Order[]).map(
+          normalizeOrderForUi,
+        ),
+      );
     } catch (err) {
       setError(`Failed to load replacement orders: ${(err as Error).message}`);
     } finally {
@@ -760,34 +861,39 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
     }
   };
 
+  const normalizeProductIdList = (ids: string[]) =>
+    Array.from(new Set(ids.map((id) => id.trim()).filter((id) => id && id !== "0")));
+
+  const updateOrderProducts = (ids: string[]) => {
+    const normalized = normalizeProductIdList(ids);
+    const primaryId = normalized[0] || "";
+    const primaryProduct = primaryId ? products.find((product) => product.id.toString() === primaryId) : null;
+    setOrderForm((prev) => ({
+      ...prev,
+      product_ids: normalized,
+      product_id: primaryId,
+      product_name: primaryProduct?.product_name || "",
+    }));
+  };
+
+  const updateOrderReplacementProducts = (ids: string[]) => {
+    const normalized = normalizeProductIdList(ids);
+    const primaryId = normalized[0] || "";
+    const primaryProduct = primaryId ? products.find((product) => product.id.toString() === primaryId) : null;
+    setOrderForm((prev) => ({
+      ...prev,
+      replacement_product_ids: normalized,
+      replacement_product_id: primaryId,
+      replacement_product_name: primaryProduct?.product_name || "",
+    }));
+  };
+
   const handleProductSelection = (productId: string) => {
-    if (!productId) {
-      setOrderForm((prev) => ({ ...prev, product_id: "", product_name: "" }));
-      return;
-    }
-    const selectedProduct = products.find((product) => product.id.toString() === productId);
-    if (selectedProduct) {
-      setOrderForm((prev) => ({
-        ...prev,
-        product_id: productId,
-        product_name: selectedProduct.product_name,
-      }));
-    }
+    updateOrderProducts(productId ? [productId] : []);
   };
 
   const handleReplacementProductSelection = (productId: string) => {
-    if (!productId) {
-      setOrderForm((prev) => ({ ...prev, replacement_product_id: "", replacement_product_name: "" }));
-      return;
-    }
-    const selectedProduct = products.find((product) => product.id.toString() === productId);
-    if (selectedProduct) {
-      setOrderForm((prev) => ({
-        ...prev,
-        replacement_product_id: productId,
-        replacement_product_name: selectedProduct.product_name,
-      }));
-    }
+    updateOrderReplacementProducts(productId ? [productId] : []);
   };
 
   const handleOrderInputChange = (
@@ -843,10 +949,16 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
         }
       }
 
-      let productId = orderForm.product_id ? Number.parseInt(orderForm.product_id, 10) : null;
-      if (!productId && orderForm.product_name) {
-        productId = findProductIdByName(orderForm.product_name);
-        if (!productId) {
+      let productIds = orderForm.product_ids.map((id) => Number.parseInt(id, 10)).filter((id) => id > 0);
+      if (!productIds.length && orderForm.product_id) {
+        const parsed = Number.parseInt(orderForm.product_id, 10);
+        if (parsed > 0) productIds = [parsed];
+      }
+      if (!productIds.length && orderForm.product_name) {
+        const fallbackId = findProductIdByName(orderForm.product_name);
+        if (fallbackId) {
+          productIds = [fallbackId];
+        } else {
           const productResponse = await authorizedFetch(`${API_BASE_URL}/Product.php`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -865,20 +977,27 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
             }),
           });
           const productData: ApiResponse = productResponse ? await productResponse.json() : { success: false };
-          if (productData.success) {
-            productId = productData.product_id || null;
+          if (productData.success && productData.product_id) {
+            productIds = [productData.product_id];
             await loadProducts();
           }
         }
       }
 
-      const replacementProductId = orderForm.replacement_product_id
-        ? Number.parseInt(orderForm.replacement_product_id, 10)
-        : null;
+      const replacementProductIds = orderForm.replacement_product_ids
+        .map((id) => Number.parseInt(id, 10))
+        .filter((id) => id > 0);
+      if (!replacementProductIds.length && orderForm.replacement_product_id) {
+        const parsed = Number.parseInt(orderForm.replacement_product_id, 10);
+        if (parsed > 0) replacementProductIds.push(parsed);
+      }
 
-      if (!clientId || !productId) {
+      if (!clientId || !productIds.length) {
         throw new Error("Please fill all required fields");
       }
+
+      const primaryProductId = productIds[0];
+      const primaryReplacementProductId = replacementProductIds[0] ?? null;
 
       const response = await authorizedFetch(
         editMode && currentItem ? `${API_BASE_URL}/Order.php?id=${currentItem.id}` : `${API_BASE_URL}/Order.php`,
@@ -887,13 +1006,16 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             client_id: clientId,
-            product_id: productId,
-            replacement_product_id: replacementProductId,
+            product_id: primaryProductId,
+            replacement_product_id: primaryReplacementProductId,
+            product_ids: productIds,
+            replacement_product_ids: replacementProductIds,
             staff_id: orderForm.staff_id ? Number.parseInt(orderForm.staff_id, 10) : null,
             issue_description: orderForm.issue_description?.trim() || "",
             warranty_status: orderForm.warranty_status,
             estimated_cost: orderForm.estimated_cost?.trim() || "",
             payment_status: orderForm.payment_status,
+            service_type: orderForm.service_type || "general",
             estimated_delivery_date: orderForm.estimated_delivery_date || "",
             status: orderForm.status,
             priority: orderForm.priority,
@@ -941,21 +1063,79 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
 
   const handleProductSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const submitAction = submitter?.value || "create_close";
+    const shouldCreateAnother = !editMode && submitAction === "create_next";
+
     try {
+      const parseResult = editMode
+        ? { pairs: [{ productName: productForm.product_name, serialNumber: productForm.serial_number }] }
+        : expandProductNameSerialPairs(productForm.product_name, productForm.serial_number);
+      if (parseResult.error || parseResult.pairs.length === 0) {
+        throw new Error(parseResult.error || "Product name is required");
+      }
+
+      const requestRows = parseResult.pairs.map((pair) => ({
+        ...productForm,
+        product_name: pair.productName,
+        serial_number: pair.serialNumber,
+      }));
+      const requestBody =
+        !editMode && requestRows.length > 1 ? { products: requestRows } : requestRows[0];
+
       const response = await authorizedFetch(
         editMode && currentItem ? `${API_BASE_URL}/Product.php?id=${currentItem.id}` : `${API_BASE_URL}/Product.php`,
         {
           method: editMode ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(productForm),
+          body: JSON.stringify(requestBody),
         },
       );
       const data: ApiResponse = response ? await response.json() : { success: false };
-      if (!data.success) throw new Error(data.message || "Failed to save product");
+      if (!(data.success || data.partial)) throw new Error(data.message || "Failed to save product");
+
+      const createdCount =
+        !editMode && typeof data.created_count === "number" ? data.created_count : requestRows.length;
+      const failedCount = !editMode && typeof data.failed_count === "number" ? data.failed_count : 0;
+
       await Promise.all([loadProducts(), loadDashboardData()]);
-      closeForm();
-      setError(null);
-      setSuccessMessage(editMode ? "Product updated successfully!" : "Product created successfully!");
+      if (!editMode && failedCount > 0) {
+        const firstError = data.errors && data.errors.length > 0 ? data.errors[0].message : "";
+        const details = firstError ? ` First error: ${firstError}` : "";
+        setError(`${failedCount} product row(s) failed.${details}`);
+      } else {
+        setError(null);
+      }
+
+      if (shouldCreateAnother) {
+        setProductForm((prev) => ({
+          ...createDefaultProductForm(),
+          is_spare_product: Boolean(prev.is_spare_product),
+          brand: prev.brand || "",
+          model: prev.model || "",
+          category: prev.category || "laptop",
+          claim_type: prev.claim_type || "none",
+          purchase_date: prev.purchase_date || "",
+          warranty_period: prev.warranty_period || "",
+          status: prev.status || "active",
+        }));
+        setEditMode(false);
+        setCurrentItem(null);
+        setSuccessMessage(
+          createdCount > 1
+            ? `${createdCount} products created. You can add the next one now.`
+            : "Product created. You can add the next one now.",
+        );
+      } else {
+        closeForm();
+        if (editMode) {
+          setSuccessMessage("Product updated successfully!");
+        } else {
+          setSuccessMessage(
+            createdCount > 1 ? `${createdCount} products created successfully!` : "Product created successfully!",
+          );
+        }
+      }
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (err) {
       setError(`Failed to save product: ${(err as Error).message}`);
@@ -963,11 +1143,32 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
   };
 
   const handleEditOrder = (order: Order) => {
+    const productIds = Array.isArray(order.product_ids)
+      ? order.product_ids.map((id) => id.toString())
+      : order.product_id
+        ? [order.product_id.toString()]
+        : [];
+    const replacementProductIds = Array.isArray(order.replacement_product_ids)
+      ? order.replacement_product_ids.map((id) => id.toString())
+      : order.replacement_product_id
+        ? [order.replacement_product_id.toString()]
+        : [];
+    const productNames = Array.isArray(order.product_names)
+      ? order.product_names
+      : order.product_name
+        ? [order.product_name]
+        : [];
+    const replacementProductNames = Array.isArray(order.replacement_product_names)
+      ? order.replacement_product_names
+      : order.replacement_product_name
+        ? [order.replacement_product_name]
+        : [];
+
     setOrderForm({
       client_name: order.client_name || "",
       client_phone: order.client_phone || "",
-      product_name: order.product_name || "",
-      replacement_product_name: order.replacement_product_name || "",
+      product_name: productNames[0] || "",
+      replacement_product_name: replacementProductNames[0] || "",
       issue_description: order.issue_description || "",
       warranty_status: order.warranty_status || "out_of_warranty",
       estimated_cost: order.estimated_cost?.toString() || "",
@@ -979,8 +1180,10 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
       priority: order.priority || "medium",
       notes: order.notes || "",
       client_id: order.client_id?.toString() || "",
-      product_id: order.product_id?.toString() || "",
-      replacement_product_id: order.replacement_product_id?.toString() || "",
+      product_id: productIds[0] || "",
+      replacement_product_id: replacementProductIds[0] || "",
+      product_ids: productIds,
+      replacement_product_ids: replacementProductIds,
       staff_id: order.staff_id?.toString() || "",
       deposit_amount: order.deposit_amount?.toString() || "",
     });
@@ -1269,6 +1472,25 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
     }
   };
 
+  const getOrderPrimaryNames = (order: Order) =>
+    Array.isArray(order.product_names) && order.product_names.length
+      ? order.product_names
+      : order.product_name
+        ? [order.product_name]
+        : [];
+
+  const getOrderReplacementNames = (order: Order) =>
+    Array.isArray(order.replacement_product_names) && order.replacement_product_names.length
+      ? order.replacement_product_names
+      : order.replacement_product_name
+        ? [order.replacement_product_name]
+        : [];
+
+  const getOrderProductSearchBlob = (order: Order) =>
+    [...getOrderPrimaryNames(order), ...getOrderReplacementNames(order)]
+      .join(" ")
+      .toLowerCase();
+
   const getFilteredDashboardData = () => {
     if (!searchTerm.trim()) return orders;
     const searchLower = searchTerm.toLowerCase();
@@ -1277,17 +1499,20 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
         order.client_name?.toLowerCase().includes(searchLower) ||
         order.client_phone?.includes(searchTerm) ||
         order.order_code?.toLowerCase().includes(searchLower) ||
-        order.staff_name?.toLowerCase().includes(searchLower),
+        order.staff_name?.toLowerCase().includes(searchLower) ||
+        getOrderProductSearchBlob(order).includes(searchLower),
     );
   };
 
   const getFilteredOrders = () =>
     orders.filter((order) => {
+      const searchLower = searchTerm.toLowerCase();
       const matchesSearch =
         !searchTerm ||
-        [order.client_name, order.product_name, order.order_code, order.issue_description, order.staff_name].some(
-          (value) => value?.toLowerCase().includes(searchTerm.toLowerCase()),
+        [order.client_name, order.order_code, order.issue_description, order.staff_name].some(
+          (value) => value?.toLowerCase().includes(searchLower),
         ) ||
+        getOrderProductSearchBlob(order).includes(searchLower) ||
         order.client_phone?.includes(searchTerm);
       const matchesStatus = filterStatus === "all" || order.status === filterStatus;
       const matchesPriority = filterPriority === "all" || order.priority === filterPriority;
@@ -1301,11 +1526,13 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
 
   const getFilteredReplacementOrders = () =>
     replacementOrders.filter((order) => {
+      const searchLower = searchTerm.toLowerCase();
       const matchesSearch =
         !searchTerm ||
-        [order.client_name, order.product_name, order.replacement_product_name, order.order_code, order.issue_description, order.staff_name].some(
-          (value) => value?.toLowerCase().includes(searchTerm.toLowerCase()),
+        [order.client_name, order.order_code, order.issue_description, order.staff_name].some(
+          (value) => value?.toLowerCase().includes(searchLower),
         ) ||
+        getOrderProductSearchBlob(order).includes(searchLower) ||
         order.client_phone?.includes(searchTerm);
       const matchesStatus = filterStatus === "all" || order.status === filterStatus;
       const matchesPriority = filterPriority === "all" || order.priority === filterPriority;
@@ -1524,13 +1751,14 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
       <div className={`main-content ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
         <header className="top-nav"><div className="nav-left">{!sidebarOpen && <motion.button className="sidebar-toggle open" onClick={() => setSidebarOpen(true)} whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}><FiMenu /></motion.button>}<div className="brand-mobile"><div className="logo-circle"><span>SC</span></div><div className="brand-info"><h2>Sun Computers</h2></div></div><motion.div className="search-box" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}><FiSearch className="search-icon" /><input type="text" placeholder={`Search ${activeTab === "dashboard" ? "dashboard by client name or mobile" : `${activeTab} by name, phone, ID...`}`} className="search-input" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} /></motion.div></div><div className="nav-right"><motion.button className="nav-btn filter-btn" onClick={() => setShowFilters(!showFilters)} whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} title="Show Filters"><FiFilter />{showFilters && <span className="filter-active"></span>}</motion.button><motion.button className="nav-btn refresh-btn" onClick={() => void handleRefresh()} whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} title="Refresh Data"><FiRefreshCw /></motion.button><div className={`notification-dropdown${showNotifications ? " open" : ""}`} ref={notificationDropdownRef}><motion.button className="nav-btn notification-btn" onClick={() => setShowNotifications((prev) => !prev)} whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}><FiBell />{notifications.filter((notification) => !notification.is_read).length > 0 && <span className="notification-badge">{notifications.filter((notification) => !notification.is_read).length}</span>}</motion.button><NotificationDropdown notifications={notifications} onNotificationClick={handleNotificationClick} onMarkAllRead={handleMarkAllNotificationsRead} onClearAll={handleClearNotifications} /></div><div className="user-menu"><div className="user-avatar-placeholder">{user.name.charAt(0).toUpperCase()}</div><div className="user-menu-info"><span>{user.name}</span><span className="user-role">{user.role}</span></div></div></div></header>
         <AnimatePresence>{showFilters && <motion.div className="filters-panel" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}><div className="advanced-filters"><div className="filter-section"><h4>Date Range Filter</h4><div className="date-presets"><button type="button" onClick={() => setDateRangePreset("today")}>Today</button><button type="button" onClick={() => setDateRangePreset("yesterday")}>Yesterday</button><button type="button" onClick={() => setDateRangePreset("thisWeek")}>This Week</button><button type="button" onClick={() => setDateRangePreset("thisMonth")}>This Month</button><button type="button" onClick={() => setDateRangePreset("lastMonth")}>Last Month</button><button type="button" onClick={() => setDateRangePreset("thisYear")}>This Year</button></div><DateRangeSelector dateRange={dateRange} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} /></div>{(activeTab === "orders" || activeTab === "dashboard") && <><div className="filter-section"><h4>Status Filter</h4><div className="status-filters">{["all", "pending", "scheduled", "process", "completed", "ready", "delivered", "cancelled"].map((status) => <button type="button" key={status} className={`status-filter ${filterStatus === status ? "active" : ""}`} onClick={() => setFilterStatus(status)}>{status.charAt(0).toUpperCase() + status.slice(1)}</button>)}</div></div><div className="filter-section"><h4>Priority Filter</h4><div className="priority-filters">{["all", "urgent", "high", "medium", "low"].map((priority) => <button type="button" key={priority} className={`priority-filter ${filterPriority === priority ? "active" : ""}`} onClick={() => setFilterPriority(priority)}>{priority.charAt(0).toUpperCase() + priority.slice(1)}</button>)}</div></div></>}{activeTab === "products" && <div className="filter-section"><h4>Status Filter</h4><div className="status-filters">{["all", "active", "discontinued", "out_of_stock"].map((status) => <button type="button" key={status} className={`status-filter ${filterStatus === status ? "active" : ""}`} onClick={() => setFilterStatus(status)}>{status.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")}</button>)}</div></div>}<div className="filter-actions"><button type="button" className="btn secondary" onClick={clearAllFilters}>Clear All Filters</button></div></div></motion.div>}</AnimatePresence>
-        <div className="dashboard-content" ref={dashboardContentRef} style={{ overflowY: "auto", height: "calc(100vh - 70px)", WebkitOverflowScrolling: "touch" }}>{successMessage && <div className="success-alert"><FiCheckCircle /><span>{successMessage}</span><button onClick={() => setSuccessMessage(null)}>×</button></div>}{error && <div className="error-alert"><FiAlertCircle /><span>{error}</span><button onClick={() => setError(null)}>×</button></div>}<div className="header-section"><div className="header-content"><div><h1>Welcome back, {user.name}! 👋</h1><p>Manage and track all service orders in one place</p>{dateRange.startDate && dateRange.endDate && <div className="date-range-info"><span>Showing data from {dateRange.startDate} to {dateRange.endDate}</span></div>}{activeTab === "dashboard" && searchTerm && <div className="search-result-info"><span>Found {dashboardSearchResults.length} results for "{searchTerm}"</span></div>}</div><div className="header-actions">{(activeTab === "orders" || activeTab === "clients" || activeTab === "products") && <motion.button className="btn primary" whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={handleNewButtonClick}><FiPlus /><span>{activeTab === "orders" && "New Order"}{activeTab === "clients" && "New Client"}{activeTab === "products" && "New Product"}</span></motion.button>}</div></div></div>{loading[activeTab as keyof LoadingState] && <div className="loading-state"><div className="loading-spinner"></div><p>Loading {activeTab} data...</p></div>}<AnimatePresence>{showForm && formType === "order" && <OrderFormModal show editMode={editMode} orderForm={orderForm} users={users} clientsForDropdown={clientsForDropdown} products={products} loadingClientsForDropdown={loading.clientsForDropdown} onClose={closeForm} onChange={handleOrderInputChange} onProductSelect={handleProductSelection} onSubmit={handleOrderSubmit} />}{showForm && formType === "client" && <ClientFormModal show editMode={editMode} clientForm={clientForm} onClose={closeForm} onChange={handleClientInputChange} onSubmit={handleClientSubmit} />}{showForm && formType === "product" && <ProductFormModal show editMode={editMode} productForm={productForm} onClose={closeForm} onChange={handleProductInputChange} onSubmit={handleProductSubmit} />}{selectedOrder && <OrderDetailModal order={selectedOrder} getStatusColor={getStatusColor} getPriorityColor={getPriorityColor} getWarrantyColor={getWarrantyColor} onClose={() => setSelectedOrder(null)} onEdit={(order) => { setSelectedOrder(null); handleEditOrder(order); }} onPrint={openOrderReceiptOptions} />}{receiptModalConfig && <ReceiptActionModal kind={receiptModalConfig.kind} code={receiptModalConfig.code} subtitle={receiptModalConfig.subtitle} description={receiptModalConfig.description} summaryItems={receiptModalConfig.summaryItems} previewMarkup={receiptModalConfig.previewMarkup} onClose={() => setReceiptTarget(null)} onDownload={() => { receiptModalConfig.onDownload(); setReceiptTarget(null); }} />}</AnimatePresence><ConfirmDeleteModal open={Boolean(deleteOrderTarget)} title={deleteOrderTarget ? `Delete ${deleteOrderTarget.order_code}` : "Delete Order"} description="This will permanently remove the order and its history." details={deleteOrderTarget ? [{ label: "Order Code", value: deleteOrderTarget.order_code }, { label: "Client", value: deleteOrderTarget.client_name || "-" }, { label: "Product", value: deleteOrderTarget.product_name || "-" }, { label: "Status", value: deleteOrderTarget.status || "-" }, { label: "Created", value: formatDisplayDate(deleteOrderTarget.created_at) }, { label: "Amount", value: `Rs. ${formatCurrency(deleteOrderTarget.final_cost || deleteOrderTarget.estimated_cost)}` }] : []} confirmLabel="Delete Order" cancelLabel="Keep Order" isProcessing={deleteOrderPending} onConfirm={confirmDeleteOrder} onCancel={() => { if (!deleteOrderPending) setDeleteOrderTarget(null); }} />{activeTab === "dashboard" && !loading.dashboard && <DashboardOverviewTab statsData={statsData} orders={orders} activities={activities} searchTerm={searchTerm} dashboardSearchResults={dashboardSearchResults} onSetActiveTab={setActiveTab} onSetFilterStatus={setFilterStatus} onViewOrder={setSelectedOrder} onEditOrder={handleEditOrder} onPrintReceipt={openOrderReceiptOptions} getPriorityColor={getPriorityColor} />}{activeTab === "orders" && <OrdersTab orders={orders} filteredOrders={filteredOrders} loading={loading.orders} searchTerm={searchTerm} filterStatus={filterStatus} filterPriority={filterPriority} dateRange={dateRange} onSearchChange={setSearchTerm} onFilterStatusChange={setFilterStatus} onFilterPriorityChange={setFilterPriority} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onViewOrder={setSelectedOrder} onEditOrder={handleEditOrder} onPrintReceipt={openOrderReceiptOptions} onDeleteOrder={handleDeleteOrder} onCreateOrder={() => { resetOrderForm(); setFormType("order"); setShowForm(true); }} onClearFilters={clearAllFilters} getStatusColor={getStatusColor} getPriorityColor={getPriorityColor} getWarrantyColor={getWarrantyColor} />}{activeTab === "replacementorders" && <ReplacementOrdersTab replacementOrders={replacementOrders} filteredReplacementOrders={filteredReplacementOrders} loading={loading.replacementOrders} searchTerm={searchTerm} filterStatus={filterStatus} filterPriority={filterPriority} dateRange={dateRange} onSearchChange={setSearchTerm} onFilterStatusChange={setFilterStatus} onFilterPriorityChange={setFilterPriority} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onViewOrder={setSelectedOrder} onEditOrder={handleEditOrder} onPrintReceipt={openOrderReceiptOptions} onDeleteOrder={handleDeleteOrder} onCreateOrder={() => { resetOrderForm(); setFormType("order"); setShowForm(true); }} onClearFilters={clearAllFilters} getStatusColor={getStatusColor} getPriorityColor={getPriorityColor} getWarrantyColor={getWarrantyColor} />}{activeTab === "clients" && <ClientsTab clients={clients} orders={orders} filteredClients={filteredClients} loading={loading.clients} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onEditClient={handleEditClient} onDeleteClient={handleDeleteClient} onCreateClient={() => { resetClientForm(); setFormType("client"); setShowForm(true); }} onClearFilters={clearAllFilters} />}{activeTab === "products" && <ProductsTab products={products} orders={orders} filteredProducts={filteredProducts} loading={loading.products} searchTerm={searchTerm} filterStatus={filterStatus} dateRange={dateRange} onSearchChange={setSearchTerm} onFilterStatusChange={setFilterStatus} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onEditProduct={handleEditProduct} onDeleteProduct={handleDeleteProduct} onCreateProduct={() => { resetProductForm(); setFormType("product"); setShowForm(true); }} onClearFilters={clearAllFilters} />}{activeTab === "spareproducts" && <SpareProductsTab spareProducts={spareProducts} orders={orders} filteredSpareProducts={filteredSpareProducts} loading={loading.spareProducts} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "shopclaim" && <ShopclaimTab shopClaims={shopClaims} orders={orders} filteredShopClaims={filteredShopClaims} loading={loading.shopClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "companyclaim" && <CompanyClaimTab companyClaims={companyClaims} orders={orders} filteredCompanyClaims={filteredCompanyClaims} loading={loading.companyClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "suntocompany" && <SunToCompanyTab sunToCompanyClaims={sunToCompanyClaims} orders={orders} filteredSunToCompanyClaims={filteredSunToCompanyClaims} loading={loading.sunToCompanyClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "companytosun" && <CompanyToSunTab companyToSunClaims={companyToSunClaims} orders={orders} filteredCompanyToSunClaims={filteredCompanyToSunClaims} loading={loading.companyToSunClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "delivery" && <DeliveryTab filteredDeliveries={filteredDeliveries} loading={loading.deliveries} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onPrintDeliveryReceipt={openDeliveryReceiptOptions} onViewOrders={() => setActiveTab("orders")} onClearFilters={clearAllFilters} />}<motion.button className={`scroll-to-top ${showScrollTop ? "visible" : ""}`} onClick={scrollToTop} initial={{ opacity: 0 }} animate={{ opacity: showScrollTop ? 1 : 0 }} transition={{ duration: 0.3 }} whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}><FiChevronUp /></motion.button><footer className="dashboard-footer"><div className="footer-content"><p>© 2026 Sun Computers Service Center. All rights reserved</p><div className="footer-links"><a href="#privacy">Privacy Policy</a><a href="#terms">Terms of Service</a><a href="#support">Support Center</a><a href="#contact">Contact Us</a></div></div></footer></div>
+        <div className="dashboard-content" ref={dashboardContentRef} style={{ overflowY: "auto", height: "calc(100vh - 70px)", WebkitOverflowScrolling: "touch" }}>{successMessage && <div className="success-alert"><FiCheckCircle /><span>{successMessage}</span><button onClick={() => setSuccessMessage(null)}>×</button></div>}{error && <div className="error-alert"><FiAlertCircle /><span>{error}</span><button onClick={() => setError(null)}>×</button></div>}<div className="header-section"><div className="header-content"><div><h1>Welcome back, {user.name}! 👋</h1><p>Manage and track all service orders in one place</p>{dateRange.startDate && dateRange.endDate && <div className="date-range-info"><span>Showing data from {dateRange.startDate} to {dateRange.endDate}</span></div>}{activeTab === "dashboard" && searchTerm && <div className="search-result-info"><span>Found {dashboardSearchResults.length} results for "{searchTerm}"</span></div>}</div><div className="header-actions">{(activeTab === "orders" || activeTab === "clients" || activeTab === "products") && <motion.button className="btn primary" whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={handleNewButtonClick}><FiPlus /><span>{activeTab === "orders" && "New Order"}{activeTab === "clients" && "New Client"}{activeTab === "products" && "New Product"}</span></motion.button>}</div></div></div>{loading[activeTab as keyof LoadingState] && <div className="loading-state"><div className="loading-spinner"></div><p>Loading {activeTab} data...</p></div>}<AnimatePresence>{showForm && formType === "order" && <OrderFormModal show editMode={editMode} orderForm={orderForm} users={users} clientsForDropdown={clientsForDropdown} products={products} loadingClientsForDropdown={loading.clientsForDropdown} onClose={closeForm} onChange={handleOrderInputChange} onProductsChange={updateOrderProducts} onReplacementProductsChange={updateOrderReplacementProducts} onSubmit={handleOrderSubmit} />}{showForm && formType === "client" && <ClientFormModal show editMode={editMode} clientForm={clientForm} onClose={closeForm} onChange={handleClientInputChange} onSubmit={handleClientSubmit} />}{showForm && formType === "product" && <ProductFormModal show editMode={editMode} productForm={productForm} onClose={closeForm} onChange={handleProductInputChange} onSubmit={handleProductSubmit} />}{selectedOrder && <OrderDetailModal order={selectedOrder} products={products} getStatusColor={getStatusColor} getPriorityColor={getPriorityColor} getWarrantyColor={getWarrantyColor} onClose={() => setSelectedOrder(null)} onEdit={(order) => { setSelectedOrder(null); handleEditOrder(order); }} onPrint={openOrderReceiptOptions} />}{receiptModalConfig && <ReceiptActionModal kind={receiptModalConfig.kind} code={receiptModalConfig.code} subtitle={receiptModalConfig.subtitle} description={receiptModalConfig.description} summaryItems={receiptModalConfig.summaryItems} previewMarkup={receiptModalConfig.previewMarkup} onClose={() => setReceiptTarget(null)} onDownload={() => { receiptModalConfig.onDownload(); setReceiptTarget(null); }} />}</AnimatePresence><ConfirmDeleteModal open={Boolean(deleteOrderTarget)} title={deleteOrderTarget ? `Delete ${deleteOrderTarget.order_code}` : "Delete Order"} description="This will permanently remove the order and its history." details={deleteOrderTarget ? [{ label: "Order Code", value: deleteOrderTarget.order_code }, { label: "Client", value: deleteOrderTarget.client_name || "-" }, { label: "Product", value: deleteOrderTarget.product_name || "-" }, { label: "Status", value: deleteOrderTarget.status || "-" }, { label: "Created", value: formatDisplayDate(deleteOrderTarget.created_at) }, { label: "Amount", value: `Rs. ${formatCurrency(deleteOrderTarget.final_cost || deleteOrderTarget.estimated_cost)}` }] : []} confirmLabel="Delete Order" cancelLabel="Keep Order" isProcessing={deleteOrderPending} onConfirm={confirmDeleteOrder} onCancel={() => { if (!deleteOrderPending) setDeleteOrderTarget(null); }} />{activeTab === "dashboard" && !loading.dashboard && <DashboardOverviewTab statsData={statsData} orders={orders} activities={activities} searchTerm={searchTerm} dashboardSearchResults={dashboardSearchResults} onSetActiveTab={setActiveTab} onSetFilterStatus={setFilterStatus} onViewOrder={setSelectedOrder} onEditOrder={handleEditOrder} onPrintReceipt={openOrderReceiptOptions} getPriorityColor={getPriorityColor} />}{activeTab === "orders" && <OrdersTab orders={orders} filteredOrders={filteredOrders} products={products} loading={loading.orders} searchTerm={searchTerm} filterStatus={filterStatus} filterPriority={filterPriority} dateRange={dateRange} onSearchChange={setSearchTerm} onFilterStatusChange={setFilterStatus} onFilterPriorityChange={setFilterPriority} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onViewOrder={setSelectedOrder} onEditOrder={handleEditOrder} onPrintReceipt={openOrderReceiptOptions} onDeleteOrder={handleDeleteOrder} onCreateOrder={() => { resetOrderForm(); setFormType("order"); setShowForm(true); }} onClearFilters={clearAllFilters} getStatusColor={getStatusColor} getPriorityColor={getPriorityColor} getWarrantyColor={getWarrantyColor} />}{activeTab === "replacementorders" && <ReplacementOrdersTab replacementOrders={replacementOrders} filteredReplacementOrders={filteredReplacementOrders} products={products} loading={loading.replacementOrders} searchTerm={searchTerm} filterStatus={filterStatus} filterPriority={filterPriority} dateRange={dateRange} onSearchChange={setSearchTerm} onFilterStatusChange={setFilterStatus} onFilterPriorityChange={setFilterPriority} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onViewOrder={setSelectedOrder} onEditOrder={handleEditOrder} onPrintReceipt={openOrderReceiptOptions} onDeleteOrder={handleDeleteOrder} onCreateOrder={() => { resetOrderForm(); setFormType("order"); setShowForm(true); }} onClearFilters={clearAllFilters} getStatusColor={getStatusColor} getPriorityColor={getPriorityColor} getWarrantyColor={getWarrantyColor} />}{activeTab === "clients" && <ClientsTab clients={clients} orders={orders} filteredClients={filteredClients} loading={loading.clients} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onEditClient={handleEditClient} onDeleteClient={handleDeleteClient} onCreateClient={() => { resetClientForm(); setFormType("client"); setShowForm(true); }} onClearFilters={clearAllFilters} />}{activeTab === "products" && <ProductsTab products={products} orders={orders} filteredProducts={filteredProducts} loading={loading.products} searchTerm={searchTerm} filterStatus={filterStatus} dateRange={dateRange} onSearchChange={setSearchTerm} onFilterStatusChange={setFilterStatus} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onEditProduct={handleEditProduct} onDeleteProduct={handleDeleteProduct} onCreateProduct={() => { resetProductForm(); setFormType("product"); setShowForm(true); }} onClearFilters={clearAllFilters} />}{activeTab === "spareproducts" && <SpareProductsTab spareProducts={spareProducts} orders={orders} filteredSpareProducts={filteredSpareProducts} loading={loading.spareProducts} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "shopclaim" && <ShopclaimTab shopClaims={shopClaims} orders={orders} filteredShopClaims={filteredShopClaims} loading={loading.shopClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "companyclaim" && <CompanyClaimTab companyClaims={companyClaims} orders={orders} filteredCompanyClaims={filteredCompanyClaims} loading={loading.companyClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "suntocompany" && <SunToCompanyTab sunToCompanyClaims={sunToCompanyClaims} orders={orders} filteredSunToCompanyClaims={filteredSunToCompanyClaims} loading={loading.sunToCompanyClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "companytosun" && <CompanyToSunTab companyToSunClaims={companyToSunClaims} orders={orders} filteredCompanyToSunClaims={filteredCompanyToSunClaims} loading={loading.companyToSunClaims} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onClearFilters={clearAllFilters} />}{activeTab === "delivery" && <DeliveryTab filteredDeliveries={filteredDeliveries} loading={loading.deliveries} searchTerm={searchTerm} dateRange={dateRange} onSearchChange={setSearchTerm} onDateRangeChange={handleDateRangeChange} onPresetClick={setDateRangePreset} onPrintDeliveryReceipt={openDeliveryReceiptOptions} onViewOrders={() => setActiveTab("orders")} onClearFilters={clearAllFilters} />}<motion.button className={`scroll-to-top ${showScrollTop ? "visible" : ""}`} onClick={scrollToTop} initial={{ opacity: 0 }} animate={{ opacity: showScrollTop ? 1 : 0 }} transition={{ duration: 0.3 }} whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}><FiChevronUp /></motion.button><footer className="dashboard-footer"><div className="footer-content"><p>© 2026 Sun Computers Service Center. All rights reserved</p><div className="footer-links"><a href="#privacy">Privacy Policy</a><a href="#terms">Terms of Service</a><a href="#support">Support Center</a><a href="#contact">Contact Us</a></div></div></footer></div>
       </div>
     </div>
   );
 };
 
 export default Dashboard;
+
 
 
 

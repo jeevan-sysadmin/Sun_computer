@@ -46,8 +46,16 @@ export interface Order {
   client_phone: string;
   product_id: number;
   product_name: string;
+  product_ids?: number[];
+  product_names?: string[];
   replacement_product_id?: number | null;
   replacement_product_name?: string;
+  replacement_product_ids?: number[];
+  replacement_product_names?: string[];
+  serial_number?: string;
+  replacement_serial_number?: string;
+  product_serial_numbers?: string[];
+  replacement_product_serial_numbers?: string[];
   issue_description: string;
   warranty_status: string;
   estimated_cost: string | number;
@@ -168,6 +176,8 @@ export interface OrderForm {
   client_id: string;
   product_id: string;
   replacement_product_id: string;
+  product_ids: string[];
+  replacement_product_ids: string[];
   staff_id: string;
   deposit_amount: string;
 }
@@ -207,6 +217,20 @@ export interface NavItem {
 export interface ApiResponse {
   success: boolean;
   message?: string;
+  partial?: boolean;
+  created_count?: number;
+  failed_count?: number;
+  created_products?: Array<{
+    index: number;
+    product_name: string;
+    product_id: number;
+    product_code: string;
+  }>;
+  errors?: Array<{
+    index: number;
+    product_name?: string;
+    message: string;
+  }>;
   stats?: DashboardStats;
   activities?: Activity[];
   user?: User;

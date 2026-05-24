@@ -12,6 +12,87 @@ const escapeReceiptHtml = (value: string | number | undefined | null) =>
     .replace(/'/g, "&#39;");
 
 export const createOrderReceiptMarkup = (order: Order) => {
+  const parseJsonArray = (value: string): unknown[] | null => {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const normalizeNames = (value: unknown) => {
+    const rawValues =
+      Array.isArray(value)
+        ? value
+        : typeof value === "number"
+          ? [value]
+          : typeof value === "string"
+            ? parseJsonArray(value.trim()) ??
+              (value.includes("||") ? value.split("||") : value.split(","))
+            : [];
+
+    return Array.from(
+      new Set(
+        rawValues
+          .map((entry) => String(entry ?? "").trim())
+          .filter((entry) => {
+            const normalized = entry.toLowerCase();
+            return Boolean(normalized) && normalized !== "null" && normalized !== "undefined";
+          }),
+      ),
+    );
+  };
+
+  const normalizeIds = (value: unknown) => {
+    const rawValues =
+      Array.isArray(value)
+        ? value
+        : typeof value === "number"
+          ? [value]
+          : typeof value === "string"
+            ? parseJsonArray(value.trim()) ?? value.split(",")
+            : [];
+
+    return Array.from(
+      new Set(
+        rawValues
+          .map((entry) => Number(entry))
+          .filter((entry) => Number.isInteger(entry) && entry > 0),
+      ),
+    );
+  };
+
+  const withIdFallback = (names: string[], ids: number[], prefix: string) =>
+    names.length > 0 ? names : ids.map((id) => `${prefix} #${id}`);
+
+  const primaryIds = Array.from(new Set([
+    ...normalizeIds(order.product_ids),
+    ...normalizeIds(order.product_id),
+  ]));
+  const replacementIds = Array.from(new Set([
+    ...normalizeIds(order.replacement_product_ids),
+    ...normalizeIds(order.replacement_product_id),
+  ]));
+  const primaryNames = withIdFallback(
+    normalizeNames(order.product_names).length > 0 ? normalizeNames(order.product_names) : normalizeNames(order.product_name),
+    primaryIds,
+    "Product",
+  );
+  const replacementNames = withIdFallback(
+    normalizeNames(order.replacement_product_names).length > 0 ? normalizeNames(order.replacement_product_names) : normalizeNames(order.replacement_product_name),
+    replacementIds,
+    "Replacement Product",
+  );
+  const primarySerials = normalizeNames(order.product_serial_numbers);
+  const replacementSerials = normalizeNames(order.replacement_product_serial_numbers);
+
+  const formatEntryList = (names: string[], serials: string[], fallbackSerial: string) =>
+    names.map((name, index) => `${index + 1}. ${name}${serials[index] ? ` (SN: ${serials[index]})` : (index === 0 && fallbackSerial ? ` (SN: ${fallbackSerial})` : "")}`);
+
+  const primaryList = formatEntryList(primaryNames, primarySerials, order.serial_number || "");
+  const replacementList = formatEntryList(replacementNames, replacementSerials, order.replacement_serial_number || "");
+
   const finalAmount = formatCurrency(order.final_cost || order.estimated_cost);
   const depositAmount = formatCurrency(order.deposit_amount);
   const createdDate = formatDisplayDate(order.created_at);
@@ -58,7 +139,9 @@ export const createOrderReceiptMarkup = (order: Order) => {
           </div>
           <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;padding:22px;margin-bottom:22px;">
             <div style="font-size:12px;text-transform:uppercase;letter-spacing:1.5px;color:#64748b;margin-bottom:14px;">Device & Issue</div>
-            <div style="font-size:22px;font-weight:700;margin-bottom:10px;">${escapeReceiptHtml(order.product_name)}</div>
+            <div style="font-size:22px;font-weight:700;margin-bottom:10px;">${escapeReceiptHtml(primaryNames[0] || order.product_name || "Not added")}</div>
+            <div style="font-size:14px;line-height:1.7;color:#334155;margin-bottom:10px;"><strong>Main Products:</strong> ${escapeReceiptHtml(primaryList.length ? primaryList.join(", ") : "Not added")}</div>
+            <div style="font-size:14px;line-height:1.7;color:#334155;margin-bottom:10px;"><strong>Replacement Products:</strong> ${escapeReceiptHtml(replacementList.length ? replacementList.join(", ") : "No replacement")}</div>
             <div style="font-size:14px;line-height:1.7;color:#334155;">${escapeReceiptHtml(order.issue_description || "Issue details not provided.")}</div>
             ${
               order.notes

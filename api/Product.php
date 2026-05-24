@@ -18,6 +18,63 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit();
 }
 
+function splitSerialInputValues($value) {
+    if ($value === null) {
+        return [];
+    }
+
+    $raw = trim((string)$value);
+    if ($raw === '') {
+        return [];
+    }
+
+    $parts = preg_split('/[\r\n\t,;|]+/', $raw);
+    if (!$parts) {
+        return [];
+    }
+
+    $serials = [];
+    $seen = [];
+
+    foreach ($parts as $part) {
+        $normalized = preg_replace('/\s+/', '', trim((string)$part));
+        if ($normalized === '') {
+            continue;
+        }
+        if (isset($seen[$normalized])) {
+            continue;
+        }
+        $seen[$normalized] = true;
+        $serials[] = $normalized;
+    }
+
+    return $serials;
+}
+
+function expandProductRowsBySerial($row) {
+    if (!is_array($row)) {
+        return [];
+    }
+
+    $serials = array_key_exists('serial_number', $row)
+        ? splitSerialInputValues($row['serial_number'])
+        : [];
+
+    if (count($serials) <= 1) {
+        $row['serial_number'] = count($serials) === 1 ? $serials[0] : '';
+        return [$row];
+    }
+
+    $expandedRows = [];
+    foreach ($serials as $serial) {
+        $copy = $row;
+        $copy['serial_number'] = $serial;
+        $expandedRows[] = $copy;
+    }
+
+    return $expandedRows;
+}
+
 function normalizeProductPayloadAliases($row) {
     if (!is_array($row)) {
         return $row;
@@ -96,6 +153,38 @@ class Product {
         $serial_number = trim((string)$serial_number);
         return preg_replace('/\s+/', '', $serial_number);
     }
+
+    private function normalizedSerialSql($columnName = 'serial_number') {
+        return "REPLACE(REPLACE(REPLACE(REPLACE(TRIM(" . $columnName . "), ' ', ''), CHAR(9), ''), CHAR(10), ''), CHAR(13), '')";
+    }
+
+    private function isDuplicateEntryException($exception) {
+        if (!($exception instanceof PDOException)) {
+            return false;
+        }
+
+        $code = $exception->errorInfo[1] ?? null;
+        return (int)$code === 1062;
+    }
+
+    private function productCodeExists($product_code) {
+        $query = "SELECT id FROM " . $this->table . " WHERE product_code = :product_code LIMIT 1";
+        $stmt = $this->conn->prepare($query);
+        $stmt->bindParam(':product_code', $product_code);
+        $stmt->execute();
+        return $stmt->fetch() ? true : false;
+    }
+
+    private function generateUniqueProductCode() {
+        for ($attempt = 0; $attempt < 8; $attempt++) {
+            $candidate = 'PRD' . date('Ymd') . strtoupper(bin2hex(random_bytes(3))); // 17 chars
+            if (!$this->productCodeExists($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return 'PRD' . date('Ymd') . strtoupper(substr(uniqid('', true), -6));
+    }
     
     // Validate claim type
     private function validateClaimType($claim_type) {
@@ -173,7 +262,14 @@ class Product {
     }
 
     public function getBySerialNumber($serial_number) {
-        $query = "SELECT * FROM " . $this->table . " WHERE serial_number = :serial_number";
+        $serial_number = $this->normalizeSerialNumber($serial_number);
+        if ($serial_number === '') {
+            return false;
+        }
+
+        $query = "SELECT * FROM " . $this->table . " 
+                  WHERE " . $this->normalizedSerialSql('serial_number') . " = :serial_number
+                  LIMIT 1";
         $stmt = $this->conn->prepare($query);
         $stmt->bindParam(':serial_number', $serial_number);
         $stmt->execute();
@@ -181,10 +277,13 @@ class Product {
     }
     
     public function checkSerialNumberExists($serial_number, $exclude_id = null) {
-        if ($serial_number === null || trim((string)$serial_number) === '') {
+        $serial_number = $this->normalizeSerialNumber($serial_number);
+        if ($serial_number === '') {
             return false;
         }
-        $query = "SELECT id FROM " . $this->table . " WHERE serial_number = :serial_number";
+
+        $query = "SELECT id FROM " . $this->table . " 
+                  WHERE " . $this->normalizedSerialSql('serial_number') . " = :serial_number";
         if ($exclude_id) {
             $query .= " AND id != :exclude_id";
         }
@@ -208,7 +307,7 @@ class Product {
         }
         
         // Generate product code
-        $this->product_code = 'PRD' . date('Ymd') . str_pad(mt_rand(1, 999), 3, '0', STR_PAD_LEFT);
+        $this->product_code = $this->generateUniqueProductCode();
         
         // Validate and set defaults
         $this->brand = !empty($this->brand) ? trim($this->brand) : null;
@@ -255,14 +354,34 @@ class Product {
         $stmt->bindParam(':price', $this->price);
         $stmt->bindParam(':status', $this->status);
         
-        if($stmt->execute()) {
-            return [
-                'success' => true, 
-                'product_id' => $this->conn->lastInsertId(),
-                'product_code' => $this->product_code,
-                'message' => 'Product created successfully'
-            ];
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            try {
+                if ($stmt->execute()) {
+                    return [
+                        'success' => true,
+                        'product_id' => $this->conn->lastInsertId(),
+                        'product_code' => $this->product_code,
+                        'message' => 'Product created successfully'
+                    ];
+                }
+            } catch (PDOException $e) {
+                if ($this->isDuplicateEntryException($e)) {
+                    $errorText = strtolower($e->getMessage());
+
+                    if (strpos($errorText, 'serial_number') !== false || strpos($errorText, 'ux_products_serial_number') !== false) {
+                        return ['success' => false, 'message' => 'Serial number already exists'];
+                    }
+
+                    if (strpos($errorText, 'product_code') !== false) {
+                        $this->product_code = $this->generateUniqueProductCode();
+                        $stmt->bindParam(':product_code', $this->product_code);
+                        continue;
+                    }
+                }
+                throw $e;
+            }
         }
+
         return ['success' => false, 'message' => 'Failed to create product'];
     }
 
@@ -419,29 +538,55 @@ try {
 
             $input = normalizeProductPayloadAliases($input);
 
+            if (!isset($input) || !is_array($input)) {
+                http_response_code(400);
+                echo json_encode(["success" => false, "message" => "Invalid input data"]);
+                break;
+            }
+
             $isBatch = isset($input['products']) && is_array($input['products']);
 
+            if (!$isBatch) {
+                $expandedInputRows = expandProductRowsBySerial($input);
+                if (count($expandedInputRows) > 1) {
+                    $isBatch = true;
+                    $input = ['products' => $expandedInputRows];
+                } elseif (count($expandedInputRows) === 1) {
+                    $input = $expandedInputRows[0];
+                }
+            }
+
             if ($isBatch) {
-                $rows = $input['products'];
-                if (count($rows) === 0) {
+                $rawRows = $input['products'];
+                if (count($rawRows) === 0) {
                     http_response_code(400);
                     echo json_encode(["success" => false, "message" => "Products array is empty"]);
                     break;
                 }
 
+                $rows = [];
                 $createdProducts = [];
                 $errors = [];
 
-                foreach ($rows as $index => $row) {
+                foreach ($rawRows as $index => $row) {
                     if (!is_array($row)) {
                         $errors[] = ["index" => $index, "message" => "Invalid row format"];
                         continue;
                     }
 
                     $row = normalizeProductPayloadAliases($row);
+                    $expandedRows = expandProductRowsBySerial($row);
+                    foreach ($expandedRows as $expandedRow) {
+                        $expandedRow['__source_index'] = $index;
+                        $rows[] = $expandedRow;
+                    }
+                }
+
+                foreach ($rows as $index => $row) {
+                    $sourceIndex = isset($row['__source_index']) ? intval($row['__source_index']) : $index;
 
                     if (empty($row['product_name']) || trim((string)$row['product_name']) === '') {
-                        $errors[] = ["index" => $index, "message" => "Product name is required"];
+                        $errors[] = ["index" => $sourceIndex, "message" => "Product name is required"];
                         continue;
                     }
 
@@ -461,14 +606,14 @@ try {
                     $result = $product->create();
                     if ($result['success']) {
                         $createdProducts[] = [
-                            "index" => $index,
+                            "index" => $sourceIndex,
                             "product_name" => $row['product_name'],
                             "product_id" => $result['product_id'],
                             "product_code" => $result['product_code']
                         ];
                     } else {
                         $errors[] = [
-                            "index" => $index,
+                            "index" => $sourceIndex,
                             "product_name" => $row['product_name'],
                             "message" => $result['message']
                         ];
@@ -563,6 +708,19 @@ try {
             }
 
             $input = normalizeProductPayloadAliases($input);
+
+            if (isset($input['serial_number'])) {
+                $serialEntries = splitSerialInputValues($input['serial_number']);
+                if (count($serialEntries) > 1) {
+                    http_response_code(400);
+                    echo json_encode([
+                        "success" => false,
+                        "message" => "Only one serial number is allowed while editing a product"
+                    ]);
+                    break;
+                }
+                $input['serial_number'] = count($serialEntries) === 1 ? $serialEntries[0] : '';
+            }
             
             // Verify product exists
             $existingProduct = $product->getById($id);

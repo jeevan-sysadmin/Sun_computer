@@ -1,9 +1,10 @@
 import OrdersTab from "./OrdersTab";
-import type { DateRange, Order } from "../types";
+import type { DateRange, Order, Product } from "../types";
 
 interface ReplacementOrdersTabProps {
   replacementOrders: Order[];
   filteredReplacementOrders: Order[];
+  products?: Product[];
   loading: boolean;
   searchTerm: string;
   filterStatus: string;
@@ -29,6 +30,7 @@ const ReplacementOrdersTab = (props: ReplacementOrdersTabProps) => (
   <OrdersTab
     orders={props.replacementOrders}
     filteredOrders={props.filteredReplacementOrders}
+    products={props.products}
     loading={props.loading}
     searchTerm={props.searchTerm}
     filterStatus={props.filterStatus}

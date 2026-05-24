@@ -17,6 +17,7 @@ import ProductDetailModal from "../modals/ProductDetailModal";
 import { exportStyledPdfReport } from "../pdfExport";
 import type { DateRange, Order, Product } from "../types";
 import { formatCurrency, formatDisplayDate } from "../utils";
+import * as XLSX from "xlsx";
 
 interface ProductsTabProps {
   products: Product[];
@@ -75,8 +76,19 @@ const ProductsTab = ({
   const paginatedProducts = filteredProducts.slice(pageStartIndex, pageStartIndex + ITEMS_PER_PAGE);
   const selectedProducts = filteredProducts.filter((product) => selectedProductIds.includes(product.id));
   const bulkProducts = selectedProducts.length > 0 ? selectedProducts : filteredProducts;
+  const excelProducts = selectedProducts.length > 0 ? selectedProducts : products;
   const allPageSelected =
     paginatedProducts.length > 0 && paginatedProducts.every((product) => selectedProductIds.includes(product.id));
+  const orderContainsProduct = (order: Order, productId: number) => {
+    if (order.product_id === productId) return true;
+    if (Array.isArray(order.product_ids)) {
+      return order.product_ids.some((id) => Number(id) === productId);
+    }
+    return false;
+  };
+  const getOrderCountForProduct = (productId: number) =>
+    orders.reduce((count, order) => (orderContainsProduct(order, productId) ? count + 1 : count), 0);
+  const getRelatedOrdersForProduct = (productId: number) => orders.filter((order) => orderContainsProduct(order, productId));
 
   useEffect(() => {
     setCurrentPage(1);
@@ -113,44 +125,27 @@ const ProductsTab = ({
     setSelectedProductIds([]);
   };
 
-  const downloadFile = (content: string, filename: string, type: string) => {
-    const blob = new Blob([content], { type });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
-  };
+  const exportProductsToExcel = () => {
+    if (excelProducts.length === 0) return;
 
-  const exportProductsToCSV = () => {
-    if (bulkProducts.length === 0) return;
+    const excelData = excelProducts.map((product) => ({
+      "Product Code": product.product_code,
+      Name: product.product_name,
+      Serial: product.serial_number || "N/A",
+      Brand: product.brand || "N/A",
+      Model: product.model || "N/A",
+      "Claim Type": formatClaimType(product.claim_type),
+      Category: product.category,
+      Price: formatCurrency(product.price),
+      Status: product.status,
+      Orders: getOrderCountForProduct(product.id),
+      Created: formatDisplayDate(product.created_at),
+    }));
 
-    const header = ["Product Code", "Name", "Serial", "Brand", "Model", "Claim Type", "Category", "Price", "Status", "Orders", "Created"];
-    const rows = bulkProducts.map((product) =>
-      [
-        product.product_code,
-        product.product_name,
-        product.serial_number || "N/A",
-        product.brand || "N/A",
-        product.model || "N/A",
-        formatClaimType(product.claim_type),
-        product.category,
-        formatCurrency(product.price),
-        product.status,
-        orders.filter((order) => order.product_id === product.id).length,
-        formatDisplayDate(product.created_at),
-      ]
-        .map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`)
-        .join(","),
-    );
-
-    downloadFile(
-      `\uFEFF${header.join(",")}\n${rows.join("\n")}`,
-      `products_${new Date().toISOString().split("T")[0]}.csv`,
-      "text/csv;charset=utf-8;",
-    );
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Products");
+    XLSX.writeFile(workbook, `products_${new Date().toISOString().split("T")[0]}.xlsx`);
   };
 
   const exportProductsToPDF = () => {
@@ -158,7 +153,7 @@ const ProductsTab = ({
     const inventoryValue = bulkProducts.reduce((sum, product) => sum + Number(product.price || 0), 0);
     const activeProducts = bulkProducts.filter((product) => product.status === "active").length;
     const linkedOrders = bulkProducts.reduce(
-      (sum, product) => sum + orders.filter((order) => order.product_id === product.id).length,
+      (sum, product) => sum + getOrderCountForProduct(product.id),
       0,
     );
 
@@ -186,7 +181,7 @@ const ProductsTab = ({
         product.category,
         `Rs. ${formatCurrency(product.price)}`,
         product.status,
-        orders.filter((order) => order.product_id === product.id).length,
+        getOrderCountForProduct(product.id),
       ]),
       columnStyles: {
         0: { cellWidth: 24 },
@@ -218,7 +213,7 @@ const ProductsTab = ({
             <td>${escapeHtml(product.category)}</td>
             <td>Rs. ${escapeHtml(formatCurrency(product.price))}</td>
             <td>${escapeHtml(product.status)}</td>
-            <td>${escapeHtml(orders.filter((order) => order.product_id === product.id).length)}</td>
+            <td>${escapeHtml(getOrderCountForProduct(product.id))}</td>
           </tr>`,
       )
       .join("");
@@ -317,10 +312,10 @@ const ProductsTab = ({
         filteredCount={filteredProducts.length}
         totalPages={totalPages}
         itemsPerPage={ITEMS_PER_PAGE}
-        helperText="Export and print use selected rows first. If nothing is selected, all filtered products are used."
+        helperText="Excel export uses selected rows first. If nothing is selected, it exports full product data."
         onSelectAll={selectAllFilteredProducts}
         onClearSelection={clearSelection}
-        onExportCSV={exportProductsToCSV}
+        onExportCSV={exportProductsToExcel}
         onExportPDF={exportProductsToPDF}
         onPrint={printProducts}
         disableSelectAll={filteredProducts.length === 0}
@@ -407,7 +402,7 @@ const ProductsTab = ({
                       <span className={`status-badge ${product.status}`}>{product.status}</span>
                     </td>
                     <td>
-                      <span className="product-orders">{orders.filter((order) => order.product_id === product.id).length}</span>
+                      <span className="product-orders">{getOrderCountForProduct(product.id)}</span>
                     </td>
                     <td>
                       <span className="client-date">{formatDisplayDate(product.created_at)}</span>
@@ -462,7 +457,7 @@ const ProductsTab = ({
       {selectedProduct && (
         <ProductDetailModal
           product={selectedProduct}
-          relatedOrders={orders.filter((order) => order.product_id === selectedProduct.id)}
+          relatedOrders={getRelatedOrdersForProduct(selectedProduct.id)}
           onClose={() => setSelectedProduct(null)}
           onEdit={(product) => {
             setSelectedProduct(null);

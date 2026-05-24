@@ -16,6 +16,7 @@ import ClientsDetailModal from "../modals/ClientsDetailModal";
 import { exportStyledPdfReport } from "../pdfExport";
 import type { Client, DateRange, Order } from "../types";
 import { formatDisplayDate } from "../utils";
+import * as XLSX from "xlsx";
 
 interface ClientsTabProps {
   clients: Client[];
@@ -67,6 +68,7 @@ const ClientsTab = ({
   const paginatedClients = filteredClients.slice(pageStartIndex, pageStartIndex + ITEMS_PER_PAGE);
   const selectedClients = filteredClients.filter((client) => selectedClientIds.includes(client.id));
   const bulkClients = selectedClients.length > 0 ? selectedClients : filteredClients;
+  const excelClients = selectedClients.length > 0 ? selectedClients : clients;
   const allPageSelected =
     paginatedClients.length > 0 && paginatedClients.every((client) => selectedClientIds.includes(client.id));
 
@@ -105,41 +107,24 @@ const ClientsTab = ({
     setSelectedClientIds([]);
   };
 
-  const downloadFile = (content: string, filename: string, type: string) => {
-    const blob = new Blob([content], { type });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
-  };
+  const exportClientsToExcel = () => {
+    if (excelClients.length === 0) return;
 
-  const exportClientsToCSV = () => {
-    if (bulkClients.length === 0) return;
+    const excelData = excelClients.map((client) => ({
+      "Client Code": client.client_code,
+      Name: client.full_name,
+      Phone: client.phone,
+      Email: client.email || "N/A",
+      City: client.city || "N/A",
+      Address: client.address || "N/A",
+      Orders: orders.filter((order) => order.client_id === client.id).length,
+      Created: formatDisplayDate(client.created_at),
+    }));
 
-    const header = ["Client Code", "Name", "Phone", "Email", "City", "Address", "Orders", "Created"];
-    const rows = bulkClients.map((client) =>
-      [
-        client.client_code,
-        client.full_name,
-        client.phone,
-        client.email || "N/A",
-        client.city || "N/A",
-        client.address || "N/A",
-        orders.filter((order) => order.client_id === client.id).length,
-        formatDisplayDate(client.created_at),
-      ]
-        .map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`)
-        .join(","),
-    );
-
-    downloadFile(
-      `\uFEFF${header.join(",")}\n${rows.join("\n")}`,
-      `clients_${new Date().toISOString().split("T")[0]}.csv`,
-      "text/csv;charset=utf-8;",
-    );
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Clients");
+    XLSX.writeFile(workbook, `clients_${new Date().toISOString().split("T")[0]}.xlsx`);
   };
 
   const exportClientsToPDF = () => {
@@ -295,10 +280,10 @@ const ClientsTab = ({
         filteredCount={filteredClients.length}
         totalPages={totalPages}
         itemsPerPage={ITEMS_PER_PAGE}
-        helperText="Export and print use selected rows first. If nothing is selected, all filtered clients are used."
+        helperText="Excel export uses selected rows first. If nothing is selected, it exports full client data."
         onSelectAll={selectAllFilteredClients}
         onClearSelection={clearSelection}
-        onExportCSV={exportClientsToCSV}
+        onExportCSV={exportClientsToExcel}
         onExportPDF={exportClientsToPDF}
         onPrint={printClients}
         disableSelectAll={filteredClients.length === 0}

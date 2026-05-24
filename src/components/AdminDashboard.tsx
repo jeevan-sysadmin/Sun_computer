@@ -49,6 +49,7 @@ import {
   downloadReceiptPdf,
 } from './dashboard/receiptUtils';
 import { exportStyledPdfReport } from './dashboard/pdfExport';
+import { expandProductNameSerialPairs } from './dashboard/productBatch';
 import ConfirmDeleteModal from './dashboard/modals/ConfirmDeleteModal';
 import type { Order as DashboardOrder } from './dashboard/types';
 
@@ -119,8 +120,12 @@ interface Order {
   client_address?: string;
   product_id: number;
   product_name: string;
+  product_ids?: number[];
+  product_names?: string[];
   replacement_product_id?: number | null;
   replacement_product_name?: string;
+  replacement_product_ids?: number[];
+  replacement_product_names?: string[];
   issue_description: string;
   warranty_status: 'in_warranty' | 'out_of_warranty' | 'extended_warranty';
   estimated_cost: string;
@@ -142,6 +147,9 @@ interface Order {
   product_brand?: string;
   product_model?: string;
   serial_number?: string;
+  replacement_serial_number?: string;
+  product_serial_numbers?: string[];
+  replacement_product_serial_numbers?: string[];
   purchase_date?: string;
   service_type?: string;
   accessories?: string;
@@ -324,10 +332,11 @@ const OrderDetailsModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
   order: Order | null;
+  products?: Product[];
   onEdit: () => void;
   onGenerateReceipt: () => void;
   onDelete: () => void;
-}> = ({ isOpen, onClose, order, onEdit, onGenerateReceipt, onDelete }) => {
+}> = ({ isOpen, onClose, order, products = [], onEdit, onGenerateReceipt, onDelete }) => {
   if (!order) return null;
 
   const getStatusIcon = (status: string) => {
@@ -393,6 +402,136 @@ const OrderDetailsModal: React.FC<{
       minute: '2-digit'
     });
   };
+
+  const parseJsonArray = (value: string): unknown[] | null => {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const normalizeNameList = (value: unknown): string[] => {
+    let rawList: unknown[] = [];
+
+    if (Array.isArray(value)) {
+      rawList = value;
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return [];
+      rawList =
+        parseJsonArray(trimmed) ??
+        (trimmed.includes('||') ? trimmed.split('||') : trimmed.split(','));
+    }
+
+    return Array.from(
+      new Set(
+        rawList
+          .map((entry) => String(entry ?? '').trim())
+          .filter(Boolean),
+      ),
+    );
+  };
+
+  const normalizeIdList = (value: unknown): number[] => {
+    let rawList: unknown[] = [];
+
+    if (Array.isArray(value)) {
+      rawList = value;
+    } else if (typeof value === 'number') {
+      rawList = [value];
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return [];
+      rawList = parseJsonArray(trimmed) ?? trimmed.split(',');
+    }
+
+    return Array.from(
+      new Set(
+        rawList
+          .map((entry) => Number(entry))
+          .filter((entry) => Number.isInteger(entry) && entry > 0),
+      ),
+    );
+  };
+
+  const withIdFallback = (names: string[], ids: number[], labelPrefix: string) => {
+    if (names.length > 0) return names;
+    return ids.map((id) => `${labelPrefix} #${id}`);
+  };
+
+  type ProductEntry = { label: string; serialNumber: string };
+
+  const buildOrderProductEntries = (
+    ids: number[],
+    names: string[],
+    serials: string[],
+    fallbackSerial: string,
+    prefix: string,
+  ): ProductEntry[] => {
+    const entries = ids.map((id, index) => {
+      const matched = products.find((product) => product.id === id);
+      return {
+        label: names[index] || matched?.product_name || `${prefix} #${id}`,
+        serialNumber: serials[index] || matched?.serial_number || (index === 0 ? fallbackSerial : '') || '',
+      };
+    });
+
+    if (entries.length > 0) return entries;
+
+    return names.map((name, index) => ({
+      label: name,
+      serialNumber: serials[index] || (index === 0 ? fallbackSerial : '') || '',
+    }));
+  };
+
+  const primaryIds = Array.from(
+    new Set([
+      ...normalizeIdList(order.product_ids),
+      ...normalizeIdList(order.product_id),
+    ]),
+  );
+  const replacementIds = Array.from(
+    new Set([
+      ...normalizeIdList(order.replacement_product_ids),
+      ...normalizeIdList(order.replacement_product_id),
+    ]),
+  );
+  const normalizedPrimaryNamesFromList = normalizeNameList(order.product_names);
+  const normalizedReplacementNamesFromList = normalizeNameList(order.replacement_product_names);
+  const primaryNames = withIdFallback(
+    normalizedPrimaryNamesFromList.length > 0
+      ? normalizedPrimaryNamesFromList
+      : normalizeNameList(order.product_name),
+    primaryIds,
+    'Product',
+  );
+  const replacementNames = withIdFallback(
+    normalizedReplacementNamesFromList.length > 0
+      ? normalizedReplacementNamesFromList
+      : normalizeNameList(order.replacement_product_name),
+    replacementIds,
+    'Replacement Product',
+  );
+  const primarySerials = normalizeNameList(order.product_serial_numbers);
+  const replacementSerials = normalizeNameList(order.replacement_product_serial_numbers);
+  const primaryEntries = buildOrderProductEntries(
+    primaryIds,
+    primaryNames,
+    primarySerials,
+    order.serial_number || '',
+    'Product',
+  );
+  const replacementEntries = buildOrderProductEntries(
+    replacementIds,
+    replacementNames,
+    replacementSerials,
+    order.replacement_serial_number || '',
+    'Replacement Product',
+  );
+  const brandValue = order.product_brand || order.brand;
+  const modelValue = order.product_model || order.model;
 
   return (
     <Modal
@@ -469,14 +608,52 @@ const OrderDetailsModal: React.FC<{
             </div>
             <div className="detail-card-content">
               <div className="detail-row">
-                <span className="detail-label">Product Name:</span>
-                <span className="detail-value">{order.product_name}</span>
+                <span className="detail-label">Main Products:</span>
+                <span
+                  className="detail-value"
+                  title={
+                    primaryEntries.length
+                      ? primaryEntries
+                          .map((entry) =>
+                            entry.serialNumber ? `${entry.label} (SN: ${entry.serialNumber})` : entry.label,
+                          )
+                          .join(', ')
+                      : 'Not added'
+                  }
+                >
+                  {primaryEntries.length
+                    ? primaryEntries
+                        .map((entry, index) =>
+                          `${index + 1}. ${entry.label}${entry.serialNumber ? ` (SN: ${entry.serialNumber})` : ''}`,
+                        )
+                        .join(', ')
+                    : 'Not added'}
+                </span>
               </div>
-              {(order.brand || order.model) && (
+              {replacementEntries.length > 0 && (
+                <div className="detail-row">
+                  <span className="detail-label">Replacement Products:</span>
+                  <span
+                    className="detail-value"
+                    title={replacementEntries
+                      .map((entry) =>
+                        entry.serialNumber ? `${entry.label} (SN: ${entry.serialNumber})` : entry.label,
+                      )
+                      .join(', ')}
+                  >
+                    {replacementEntries
+                      .map((entry, index) =>
+                        `${index + 1}. ${entry.label}${entry.serialNumber ? ` (SN: ${entry.serialNumber})` : ''}`,
+                      )
+                      .join(', ')}
+                  </span>
+                </div>
+              )}
+              {(brandValue || modelValue) && (
                 <div className="detail-row">
                   <span className="detail-label">Brand/Model:</span>
                   <span className="detail-value">
-                    {order.brand} {order.model ? `- ${order.model}` : ''}
+                    {brandValue || 'N/A'} {modelValue ? `- ${modelValue}` : ''}
                   </span>
                 </div>
               )}
@@ -1144,6 +1321,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     client_phone: '',
     product_id: '',
     replacement_product_id: '',
+    product_ids: [] as string[],
+    replacement_product_ids: [] as string[],
     product_name: '',
     replacement_product_name: '',
     service_type: 'general',
@@ -1171,7 +1350,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     notes: ''
   });
   
-  const [newProduct, setNewProduct] = useState({
+  const getDefaultNewProduct = () => ({
     product_name: '',
     serial_number: '',
     is_spare_product: false,
@@ -1187,6 +1366,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     specifications: '',
     status: 'active' as 'active' | 'inactive' | 'discontinued'
   });
+
+  const [newProduct, setNewProduct] = useState(getDefaultNewProduct);
   
   // API Configuration
   const API_BASE_URL = "http://localhost/sun_computers/api";
@@ -1590,16 +1771,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           customer_since: client.created_at
         }));
         
-        // We'll keep the main clients list as is, but ensure we have data
-        if (clients.length === 0) {
-          setClients(mappedClients);
-        }
+        // Keep client list in sync for the order form dropdown.
+        setClients(mappedClients);
         return mappedClients;
       } else {
+        setClients([]);
         return [];
       }
     } catch (error) {
       console.error('Error loading clients for dropdown:', error);
+      setClients([]);
       return [];
     }
   };
@@ -1609,7 +1790,93 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       const data = await apiRequest('admin_api.php?action=get_orders');
       
       if (data.success && data.orders) {
-        const mappedOrders: Order[] = data.orders.map((order: any) => ({
+        const toNumberArray = (value: unknown): number[] => {
+          if (Array.isArray(value)) {
+            return value
+              .map((entry) => parseInt(String(entry), 10))
+              .filter((entry) => Number.isFinite(entry) && entry > 0);
+          }
+          if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) return [];
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (Array.isArray(parsed)) {
+                return parsed
+                  .map((entry) => parseInt(String(entry), 10))
+                  .filter((entry) => Number.isFinite(entry) && entry > 0);
+              }
+            } catch {
+              // keep fallback below
+            }
+            return trimmed
+              .split(',')
+              .map((entry) => parseInt(entry.trim(), 10))
+              .filter((entry) => Number.isFinite(entry) && entry > 0);
+          }
+          return [];
+        };
+
+        const toStringArray = (value: unknown): string[] => {
+          if (Array.isArray(value)) {
+            return value
+              .map((entry) => String(entry || '').trim())
+              .filter(Boolean);
+          }
+          if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) return [];
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (Array.isArray(parsed)) {
+                return parsed
+                  .map((entry) => String(entry || '').trim())
+                  .filter(Boolean);
+              }
+            } catch {
+              // keep fallback below
+            }
+            return trimmed
+              .split(trimmed.includes('||') ? '||' : ',')
+              .map((entry) => entry.trim())
+              .filter(Boolean);
+          }
+          return [];
+        };
+
+        const mappedOrders: Order[] = data.orders.map((order: any) => {
+          const parsedProductIds = toNumberArray(order.product_ids);
+          const parsedReplacementProductIds = toNumberArray(order.replacement_product_ids);
+          const parsedProductNames = toStringArray(order.product_names);
+          const parsedReplacementProductNames = toStringArray(order.replacement_product_names);
+          const primaryProductId = parseInt(String(order.product_id || ''), 10);
+          const primaryReplacementProductId = parseInt(String(order.replacement_product_id || ''), 10);
+          const normalizedProductIds =
+            parsedProductIds.length > 0
+              ? parsedProductIds
+              : Number.isFinite(primaryProductId) && primaryProductId > 0
+                ? [primaryProductId]
+                : [];
+          const normalizedReplacementProductIds =
+            parsedReplacementProductIds.length > 0
+              ? parsedReplacementProductIds
+              : Number.isFinite(primaryReplacementProductId) && primaryReplacementProductId > 0
+                ? [primaryReplacementProductId]
+                : [];
+          const normalizedProductNames =
+            parsedProductNames.length > 0
+              ? parsedProductNames
+              : order.product_name
+                ? [order.product_name]
+                : [];
+          const normalizedReplacementProductNames =
+            parsedReplacementProductNames.length > 0
+              ? parsedReplacementProductNames
+              : order.replacement_product_name
+                ? [order.replacement_product_name]
+                : [];
+
+          return {
           id: parseInt(order.id),
           order_code: order.order_code || `ORD${order.id}`,
           client_id: parseInt(order.client_id) || 0,
@@ -1617,10 +1884,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           client_phone: order.client_phone || '',
           client_email: order.client_email,
           client_address: order.client_address,
-          product_id: parseInt(order.product_id) || 0,
-          product_name: order.product_name || 'Unknown',
-          replacement_product_id: order.replacement_product_id ? parseInt(order.replacement_product_id) : null,
-          replacement_product_name: order.replacement_product_name || '',
+          product_id: normalizedProductIds[0] || (Number.isFinite(primaryProductId) ? primaryProductId : 0),
+          product_name: normalizedProductNames[0] || order.product_name || 'Unknown',
+          product_ids: normalizedProductIds,
+          product_names: normalizedProductNames,
+          replacement_product_id:
+            normalizedReplacementProductIds[0] ||
+            (Number.isFinite(primaryReplacementProductId) ? primaryReplacementProductId : null),
+          replacement_product_name: normalizedReplacementProductNames[0] || order.replacement_product_name || '',
+          replacement_product_ids: normalizedReplacementProductIds,
+          replacement_product_names: normalizedReplacementProductNames,
           issue_description: order.issue_description || '',
           warranty_status: order.warranty_status || 'out_of_warranty',
           estimated_cost: order.estimated_cost || '0',
@@ -1648,7 +1921,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           technician_notes: order.technician_notes,
           customer_feedback: order.customer_feedback,
           next_service_date: order.next_service_date
-        }));
+          };
+        });
         
         setOrders(mappedOrders);
         setSelectedOrders([]);
@@ -2201,9 +2475,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       requests.push(loadStaffForDropdown());
     }
 
-    if (clients.length === 0) {
-      requests.push(loadClientsForDropdown());
-    }
+    // Always refresh clients from API before opening order forms.
+    requests.push(loadClientsForDropdown());
 
     if (requests.length > 0) {
       await Promise.all(requests);
@@ -2327,8 +2600,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   // Handle create order
   const handleCreateOrder = async () => {
     try {
-      if (!newOrder.client_name || !newOrder.client_phone || !newOrder.product_name) {
-        setError('Please fill in all required fields (Client Name, Client Phone, Product Name)');
+      const hasProducts = (newOrder.product_ids?.length || 0) > 0 || !!newOrder.product_id || !!newOrder.product_name;
+      if (!newOrder.client_name || !newOrder.client_phone || !hasProducts) {
+        setError('Please fill in all required fields (Client Name, Client Phone, Product)');
         return;
       }
       
@@ -2338,6 +2612,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         client_phone: newOrder.client_phone,
         product_id: newOrder.product_id || '',
         replacement_product_id: newOrder.replacement_product_id || '',
+        product_ids: newOrder.product_ids || [],
+        replacement_product_ids: newOrder.replacement_product_ids || [],
         product_name: newOrder.product_name,
         service_type: newOrder.service_type || 'general',
         issue_description: newOrder.issue_description.trim(),
@@ -2368,6 +2644,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           client_phone: '',
           product_id: '',
           replacement_product_id: '',
+          product_ids: [],
+          replacement_product_ids: [],
           product_name: '',
           replacement_product_name: '',
           service_type: 'general',
@@ -2440,59 +2718,80 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   };
   
   // Handle create product
-  const handleCreateProduct = async () => {
+  const handleCreateProduct = async (options?: { keepOpen?: boolean }) => {
     try {
-      if (!newProduct.product_name || !newProduct.price) {
-        setError('Please fill in all required fields (Product Name, Price)');
+      const parseResult = expandProductNameSerialPairs(newProduct.product_name, newProduct.serial_number);
+      if (parseResult.error || parseResult.pairs.length === 0) {
+        setError(parseResult.error || 'Product name is required');
         return;
       }
-      
-      const productData = {
-        product_name: newProduct.product_name,
-        serial_number: newProduct.serial_number || '',
+
+      const productRows = parseResult.pairs.map((pair) => ({
+        product_name: pair.productName,
+        serial_number: pair.serialNumber,
         is_spare_product: newProduct.is_spare_product ? 1 : 0,
         brand: newProduct.brand || '',
         model: newProduct.model || '',
         category: newProduct.category,
         claim_type: newProduct.claim_type || 'none',
         price: parseFloat(newProduct.price) || 0,
-        stock_quantity: parseInt(newProduct.stock_quantity) || 0,
-        min_stock_level: parseInt(newProduct.min_stock_level) || 5,
+        stock_quantity: parseInt(newProduct.stock_quantity, 10) || 0,
+        min_stock_level: parseInt(newProduct.min_stock_level, 10) || 5,
         purchase_date: newProduct.purchase_date,
         warranty_period: newProduct.warranty_period,
         status: newProduct.status,
         specifications: newProduct.specifications || ''
-      };
-      
-      console.log('Creating product with data:', productData);
-      
-      const data = await apiRequest('admin_api.php?action=create_product', 'POST', productData);
-      
-      if (data.success) {
-        setSuccessMessage('Product created successfully');
-        await loadProducts();
-        await loadDashboardData();
-        setShowCreateProduct(false);
-        setNewProduct({
-          product_name: '',
-          serial_number: '',
-          is_spare_product: false,
-          brand: '',
-          model: '',
-          category: 'laptop',
-          claim_type: 'none',
-          price: '0',
-          stock_quantity: '0',
-          min_stock_level: '5',
-          purchase_date: new Date().toISOString().split('T')[0],
-          warranty_period: '1 year',
-          specifications: '',
-          status: 'active'
-        });
-        setTimeout(() => setSuccessMessage(null), 3000);
-      } else {
+      }));
+
+      const payload = productRows.length > 1 ? { products: productRows } : productRows[0];
+      console.log('Creating product with data:', payload);
+
+      const data = await apiRequest('admin_api.php?action=create_product', 'POST', payload);
+      if (!(data.success || data.partial)) {
         setError(data.message || 'Failed to create product');
+        return;
       }
+
+      const createdCount = typeof data.created_count === 'number' ? data.created_count : productRows.length;
+      const failedCount = typeof data.failed_count === 'number' ? data.failed_count : 0;
+
+      await loadProducts();
+      await loadDashboardData();
+
+      if (options?.keepOpen) {
+        setSuccessMessage(
+          createdCount > 1
+            ? `${createdCount} products created. Add the next product.`
+            : 'Product created. Add the next product.',
+        );
+        setNewProduct((prev) => ({
+          ...getDefaultNewProduct(),
+          is_spare_product: Boolean(prev.is_spare_product),
+          brand: prev.brand || '',
+          model: prev.model || '',
+          category: prev.category || 'laptop',
+          claim_type: prev.claim_type || 'none',
+          purchase_date: prev.purchase_date || '',
+          warranty_period: prev.warranty_period || '',
+          status: prev.status || 'active',
+        }));
+      } else {
+        setSuccessMessage(
+          createdCount > 1 ? `${createdCount} products created successfully` : 'Product created successfully',
+        );
+        setShowCreateProduct(false);
+        setNewProduct(getDefaultNewProduct());
+      }
+
+      if (failedCount > 0) {
+        const firstError = Array.isArray(data.errors) && data.errors.length > 0 ? data.errors[0]?.message : '';
+        const details = firstError ? ` First error: ${firstError}` : '';
+        setError(`${failedCount} product row(s) failed.${details}`);
+      } else {
+        setError(null);
+      }
+
+      setTimeout(() => setSuccessMessage(null), 3000);
     } catch (error: any) {
       setError(error.message || 'Failed to create product');
     }
@@ -2558,7 +2857,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       setDeleteOrderPending(false);
     }
   };
-  
+
   const handleDeleteClient = async (id: number) => {
     if (window.confirm('Are you sure you want to delete this client?')) {
       try {
@@ -2629,14 +2928,52 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
     if (type === 'order') {
       setEditType('order');
+      const productIds = Array.isArray((data as any).product_ids)
+        ? (data as any).product_ids.map((id: number | string) => id.toString())
+        : data.product_id
+          ? [String(data.product_id)]
+          : [];
+      const replacementProductIds = Array.isArray((data as any).replacement_product_ids)
+        ? (data as any).replacement_product_ids.map((id: number | string) => id.toString())
+        : data.replacement_product_id
+          ? [String(data.replacement_product_id)]
+          : [];
       setEditData({
         ...data,
         client_id: data.client_id ? String(data.client_id) : '',
-        product_id: data.product_id ? String(data.product_id) : '',
-        replacement_product_id: data.replacement_product_id ? String(data.replacement_product_id) : '',
+        product_id: productIds[0] || '',
+        replacement_product_id: replacementProductIds[0] || '',
+        product_ids: productIds,
+        replacement_product_ids: replacementProductIds,
         replacement_product_name: data.replacement_product_name || '',
         staff_id: data.staff_id ? String(data.staff_id) : '',
       });
+      setShowEditModal(true);
+      return;
+    }
+
+    if (type === 'product') {
+      const isSpareProduct =
+        data.is_spare_product === true ||
+        data.is_spare_product === 1 ||
+        data.is_spare_product === '1' ||
+        data.is_spare_product === 'true';
+
+      setEditType('product');
+      setEditData({
+        ...data,
+        claim_type: data.claim_type || 'none',
+        serial_number: data.serial_number || '',
+        is_spare_product: isSpareProduct,
+        purchase_date: data.purchase_date || '',
+        warranty_period: data.warranty_period || '',
+        specifications: data.specifications || '',
+        price: String(data.price ?? '0'),
+        stock_quantity: String(data.stock_quantity ?? '0'),
+        min_stock_level: String(data.min_stock_level ?? '5'),
+        status: data.status || 'active',
+      });
+      setShowCreateProduct(false);
       setShowEditModal(true);
       return;
     }
@@ -2674,6 +3011,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             client_phone: editData.client_phone,
             product_id: editData.product_id || '',
             replacement_product_id: editData.replacement_product_id || '',
+            product_ids: editData.product_ids || [],
+            replacement_product_ids: editData.replacement_product_ids || [],
             product_name: editData.product_name,
             service_type: editData.service_type || 'general',
             issue_description: editData.issue_description,
@@ -2710,13 +3049,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           requestData = {
             id: editData.id,
             product_name: editData.product_name,
+            serial_number: editData.serial_number || '',
+            is_spare_product: editData.is_spare_product ? 1 : 0,
             brand: editData.brand,
             model: editData.model,
             category: editData.category,
+            claim_type: editData.claim_type || 'none',
+            purchase_date: editData.purchase_date || '',
+            warranty_period: editData.warranty_period || '',
             specifications: editData.specifications,
-            price: editData.price,
-            stock_quantity: editData.stock_quantity,
-            min_stock_level: editData.min_stock_level,
+            price: parseFloat(editData.price || '0') || 0,
+            stock_quantity: parseInt(editData.stock_quantity || '0', 10) || 0,
+            min_stock_level: parseInt(editData.min_stock_level || '5', 10) || 5,
             status: editData.status
           };
           break;
@@ -3021,6 +3365,25 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     );
   };
 
+  const getOrderProductSearchBlob = (order: Order) => {
+    const primaryNames =
+      Array.isArray(order.product_names) && order.product_names.length
+        ? order.product_names
+        : order.product_name
+          ? [order.product_name]
+          : [];
+    const replacementNames =
+      Array.isArray(order.replacement_product_names) && order.replacement_product_names.length
+        ? order.replacement_product_names
+        : order.replacement_product_name
+          ? [order.replacement_product_name]
+          : [];
+    return [...primaryNames, ...replacementNames]
+      .map((name) => String(name || '').trim().toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+  };
+
   const filteredOrdersForDashboard = orders.filter((order) => {
     const search = searchTerm.toLowerCase();
     const matchesSearch =
@@ -3029,10 +3392,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         order.order_code,
         order.client_name,
         order.client_phone,
-        order.product_name,
         order.issue_description,
         order.staff_name || ''
-      ].some((value) => String(value || '').toLowerCase().includes(search));
+      ].some((value) => String(value || '').toLowerCase().includes(search)) ||
+      getOrderProductSearchBlob(order).includes(search);
 
     const matchesStatus = !filters.orders.status || order.status === filters.orders.status;
     const matchesPriority = !filters.orders.priority || order.priority === filters.orders.priority;
@@ -3049,11 +3412,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         order.order_code,
         order.client_name,
         order.client_phone,
-        order.product_name,
-        order.replacement_product_name || '',
         order.issue_description,
         order.staff_name || ''
-      ].some((value) => String(value || '').toLowerCase().includes(search));
+      ].some((value) => String(value || '').toLowerCase().includes(search)) ||
+      getOrderProductSearchBlob(order).includes(search);
 
     const matchesStatus = !filters.orders.status || order.status === filters.orders.status;
     const matchesPriority = !filters.orders.priority || order.priority === filters.orders.priority;
@@ -3313,16 +3675,37 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   };
   
   // Export functions
+  const serializeExportValue = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => (typeof entry === 'object' ? JSON.stringify(entry) : String(entry)))
+        .join(' | ');
+    }
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+    return String(value);
+  };
+
   const exportToCSV = (data: any[], filename: string) => {
     if (!data || data.length === 0) {
       setError('No data to export');
       return;
     }
-    
-    const headers = Object.keys(data[0]);
+
+    const headers = Array.from(
+      new Set(
+        data.flatMap((row) => Object.keys(row || {})),
+      ),
+    );
     const csvContent = [
       headers.join(','),
-      ...data.map(row => headers.map(header => `"${row[header] || ''}"`).join(','))
+      ...data.map((row) =>
+        headers
+          .map((header) => `"${serializeExportValue(row?.[header]).replace(/"/g, '""')}"`)
+          .join(','),
+      ),
     ].join('\n');
     
     const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -3344,7 +3727,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
       return;
     }
 
-    const headers = Object.keys(data[0]);
+    const headers = Array.from(
+      new Set(
+        data.flatMap((row) => Object.keys(row || {})),
+      ),
+    );
     const readableHeaders = headers.map((header) =>
       header
         .replace(/_/g, ' ')
@@ -3352,8 +3739,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     );
     const tableData = data.map((row) =>
       headers.map((header) => {
-        const value = row[header];
-        return value === null || value === undefined || value === '' ? 'N/A' : String(value);
+        const serialized = serializeExportValue(row?.[header]);
+        return serialized === '' ? 'N/A' : serialized;
       }),
     );
 
@@ -3493,6 +3880,33 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     }
   };
 
+  const normalizeProductIdList = (ids: string[]) =>
+    Array.from(new Set(ids.map((id) => id.trim()).filter((id) => id && id !== '0')));
+
+  const updateNewOrderProducts = (productIds: string[]) => {
+    const normalized = normalizeProductIdList(productIds);
+    const primaryId = normalized[0] || '';
+    const primaryProduct = primaryId ? products.find((product) => product.id.toString() === primaryId) : null;
+    setNewOrder(prev => ({
+      ...prev,
+      product_ids: normalized,
+      product_id: primaryId,
+      product_name: primaryProduct?.product_name || ''
+    }));
+  };
+
+  const updateNewOrderReplacementProducts = (productIds: string[]) => {
+    const normalized = normalizeProductIdList(productIds);
+    const primaryId = normalized[0] || '';
+    const primaryProduct = primaryId ? products.find((product) => product.id.toString() === primaryId) : null;
+    setNewOrder(prev => ({
+      ...prev,
+      replacement_product_ids: normalized,
+      replacement_product_id: primaryId,
+      replacement_product_name: primaryProduct?.product_name || ''
+    }));
+  };
+
   const handleNewOrderChange = (
     e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
   ) => {
@@ -3512,12 +3926,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     }
 
     if (name === 'replacement_product_id') {
-      const replacementProduct = products.find(product => product.id.toString() === value);
-      setNewOrder(prev => ({
-        ...prev,
-        replacement_product_id: value,
-        replacement_product_name: replacementProduct?.product_name || ''
-      }));
+      updateNewOrderReplacementProducts(value ? [value] : []);
+      return;
+    }
+
+    if (name === 'product_id') {
+      updateNewOrderProducts(value ? [value] : []);
       return;
     }
 
@@ -3527,12 +3941,30 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     }));
   };
 
-  const handleNewOrderProductSelect = (productId: string) => {
-    const selectedProduct = products.find(product => product.id.toString() === productId);
-    setNewOrder(prev => ({
+
+  const updateEditOrderProducts = (productIds: string[]) => {
+    if (!editData) return;
+    const normalized = normalizeProductIdList(productIds);
+    const primaryId = normalized[0] || '';
+    const primaryProduct = primaryId ? products.find((product) => product.id.toString() === primaryId) : null;
+    setEditData((prev: any) => ({
       ...prev,
-      product_id: productId,
-      product_name: selectedProduct?.product_name || ''
+      product_ids: normalized,
+      product_id: primaryId,
+      product_name: primaryProduct?.product_name || prev?.product_name || ''
+    }));
+  };
+
+  const updateEditOrderReplacementProducts = (productIds: string[]) => {
+    if (!editData) return;
+    const normalized = normalizeProductIdList(productIds);
+    const primaryId = normalized[0] || '';
+    const primaryProduct = primaryId ? products.find((product) => product.id.toString() === primaryId) : null;
+    setEditData((prev: any) => ({
+      ...prev,
+      replacement_product_ids: normalized,
+      replacement_product_id: primaryId,
+      replacement_product_name: primaryProduct?.product_name || prev?.replacement_product_name || ''
     }));
   };
 
@@ -3563,12 +3995,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     }
 
     if (name === 'replacement_product_id') {
-      const replacementProduct = products.find((product) => product.id.toString() === value);
-      setEditData((prev: any) => ({
-        ...prev,
-        replacement_product_id: value,
-        replacement_product_name: replacementProduct?.product_name || ''
-      }));
+      updateEditOrderReplacementProducts(value ? [value] : []);
+      return;
+    }
+
+    if (name === 'product_id') {
+      updateEditOrderProducts(value ? [value] : []);
       return;
     }
 
@@ -3578,14 +4010,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     }));
   };
 
-  const handleEditOrderProductSelect = (productId: string) => {
-    const selectedProduct = products.find((product) => product.id.toString() === productId);
-    setEditData((prev: any) => ({
-      ...prev,
-      product_id: productId,
-      product_name: selectedProduct?.product_name || ''
-    }));
-  };
 
   const submitNewOrderForm = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -3619,6 +4043,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     const { name, value, type } = target;
     const nextValue = type === 'checkbox' ? target.checked : value;
 
+    if (showEditModal && editType === 'product') {
+      setEditData((prev: any) => ({
+        ...prev,
+        [name]: nextValue
+      }));
+      return;
+    }
+
     setNewProduct(prev => ({
       ...prev,
       [name]: nextValue
@@ -3627,7 +4059,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
   const submitNewProductForm = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    void handleCreateProduct();
+    if (showEditModal && editType === 'product') {
+      void handleSaveEdit();
+      return;
+    }
+    const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const submitAction = submitter?.value || 'create_close';
+    void handleCreateProduct({ keepOpen: submitAction === 'create_next' });
   };
 
   void handleDeleteDelivery;
@@ -4176,6 +4614,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             <OrdersTab
               orders={orders as any}
               filteredOrders={filteredOrdersForDashboard as any}
+              products={products as any}
               loading={loading.orders}
               searchTerm={searchTerm}
               filterStatus={filters.orders.status || 'all'}
@@ -4209,6 +4648,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
             <ReplacementOrdersTab
               replacementOrders={filteredReplacementOrdersForDashboard as any}
               filteredReplacementOrders={filteredReplacementOrdersForDashboard as any}
+              products={products as any}
               loading={loading.replacementorders}
               searchTerm={searchTerm}
               filterStatus={filters.orders.status || 'all'}
@@ -4273,7 +4713,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
               onPresetClick={setDateRangePreset}
               onEditProduct={(product) => handleEdit('product', product)}
               onDeleteProduct={handleDeleteProduct}
-              onCreateProduct={() => setShowCreateProduct(true)}
+              onCreateProduct={() => {
+                setShowCreateProduct(true);
+              }}
               onClearFilters={clearAllFilters}
             />
           )}
@@ -4488,7 +4930,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         loadingClientsForDropdown={loading.clients}
         onClose={() => setShowCreateOrder(false)}
         onChange={handleNewOrderChange}
-        onProductSelect={handleNewOrderProductSelect}
+        onProductsChange={updateNewOrderProducts}
+        onReplacementProductsChange={updateNewOrderReplacementProducts}
         onSubmit={submitNewOrderForm}
       />
 
@@ -4514,6 +4957,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           client_id: editData?.client_id || '',
           product_id: editData?.product_id || '',
           replacement_product_id: editData?.replacement_product_id || '',
+          product_ids: editData?.product_ids || [],
+          replacement_product_ids: editData?.replacement_product_ids || [],
           staff_id: editData?.staff_id || '',
           deposit_amount: String(editData?.deposit_amount ?? '0'),
         }}
@@ -4526,7 +4971,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           setEditData(null);
         }}
         onChange={handleEditOrderChange}
-        onProductSelect={handleEditOrderProductSelect}
+        onProductsChange={updateEditOrderProducts}
+        onReplacementProductsChange={updateEditOrderReplacementProducts}
         onSubmit={submitEditOrderForm}
       />
       
@@ -4545,13 +4991,45 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
         show={showCreateProduct}
         editMode={false}
         productForm={newProduct}
-        onClose={() => setShowCreateProduct(false)}
+        onClose={() => {
+          setShowCreateProduct(false);
+        }}
+        onChange={handleNewProductChange}
+        onSubmit={submitNewProductForm}
+      />
+
+      {/* Edit Product Modal */}
+      <ProductFormModal
+        show={showEditModal && editType === 'product'}
+        editMode={true}
+        productForm={{
+          product_name: editData?.product_name || '',
+          serial_number: editData?.serial_number || '',
+          is_spare_product:
+            editData?.is_spare_product === true ||
+            editData?.is_spare_product === 1 ||
+            editData?.is_spare_product === '1' ||
+            editData?.is_spare_product === 'true',
+          brand: editData?.brand || '',
+          model: editData?.model || '',
+          category: editData?.category || 'laptop',
+          claim_type: editData?.claim_type || 'none',
+          specifications: editData?.specifications || '',
+          purchase_date: editData?.purchase_date || '',
+          warranty_period: editData?.warranty_period || '',
+          price: String(editData?.price ?? '0'),
+          status: editData?.status || 'active',
+        }}
+        onClose={() => {
+          setShowEditModal(false);
+          setEditData(null);
+        }}
         onChange={handleNewProductChange}
         onSubmit={submitNewProductForm}
       />
       {/* Edit Modal */}
       <Modal
-        isOpen={showEditModal && editType !== 'user' && editType !== 'order'}
+        isOpen={showEditModal && editType !== 'user' && editType !== 'order' && editType !== 'product'}
         onClose={() => setShowEditModal(false)}
         title={`Edit ${editType.charAt(0).toUpperCase() + editType.slice(1)}`}
         size="lg"
@@ -5168,6 +5646,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           setSelectedOrderDetails(null);
         }}
         order={selectedOrderDetails}
+        products={products as any}
         onEdit={handleOrderDetailsEdit}
         onGenerateReceipt={handleOrderDetailsReceipt}
         onDelete={handleOrderDetailsDelete}

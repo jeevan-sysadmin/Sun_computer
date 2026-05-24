@@ -14,23 +14,29 @@ interface OrderFormModalProps {
   loadingClientsForDropdown: boolean;
   onClose: () => void;
   onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => void;
-  onProductSelect: (productId: string) => void;
+  onProductsChange: (productIds: string[]) => void;
+  onReplacementProductsChange: (productIds: string[]) => void;
   onSubmit: (e: FormEvent<HTMLFormElement>) => void;
 }
 
-const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, products, loadingClientsForDropdown, onClose, onChange, onProductSelect, onSubmit }: OrderFormModalProps) => {
+const isSpareProduct = (product: Product) => {
+  if (typeof product.is_spare_product === "boolean") return product.is_spare_product;
+  if (typeof product.is_spare_product === "number") return product.is_spare_product === 1;
+  const normalized = String(product.is_spare_product ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+};
+
+const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, products, loadingClientsForDropdown, onClose, onChange, onProductsChange, onReplacementProductsChange, onSubmit }: OrderFormModalProps) => {
   const [clientSearchTerm, setClientSearchTerm] = useState("");
   const [showClientDropdown, setShowClientDropdown] = useState(false);
-  const [productSearchTerm, setProductSearchTerm] = useState(orderForm.product_name);
+  const [productSearchTerm, setProductSearchTerm] = useState("");
   const [showProductDropdown, setShowProductDropdown] = useState(false);
-  const [replacementSearchTerm, setReplacementSearchTerm] = useState(orderForm.replacement_product_name);
+  const [replacementSearchTerm, setReplacementSearchTerm] = useState("");
   const [showReplacementDropdown, setShowReplacementDropdown] = useState(false);
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const [selectedStaff, setSelectedStaff] = useState<User | null>(null);
   const [showReplacementProducts, setShowReplacementProducts] = useState(false);
 
-  useEffect(() => setProductSearchTerm(orderForm.product_name), [orderForm.product_name]);
-  useEffect(() => setReplacementSearchTerm(orderForm.replacement_product_name), [orderForm.replacement_product_name]);
   useEffect(() => {
     if (orderForm.client_id) setSelectedClient(clientsForDropdown.find((c) => c.id.toString() === orderForm.client_id) || null);
     else setSelectedClient(null);
@@ -48,49 +54,85 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
       setShowReplacementProducts(false);
       setShowProductDropdown(false);
       setShowReplacementDropdown(false);
+      setProductSearchTerm("");
+      setReplacementSearchTerm("");
     }
   }, [show]);
   useEffect(() => {
-    setShowReplacementProducts(Boolean(orderForm.replacement_product_id));
-  }, [orderForm.replacement_product_id]);
+    const hasReplacementProducts =
+      orderForm.replacement_product_ids.length > 0 ||
+      Boolean(orderForm.replacement_product_id) ||
+      Boolean(orderForm.replacement_product_name?.trim());
+    setShowReplacementProducts(hasReplacementProducts);
+  }, [orderForm.replacement_product_id, orderForm.replacement_product_ids, orderForm.replacement_product_name]);
 
   const filteredProducts = useMemo(() => {
     const search = productSearchTerm.trim().toLowerCase();
-    const sourceProducts = products.filter((p) => !Boolean(Number(p.is_spare_product || 0)));
+    const selectedIds = new Set(orderForm.product_ids.map((id) => id.toString()));
+    const sourceProducts = products.filter((p) => !isSpareProduct(p) && !selectedIds.has(p.id.toString()));
     if (!search) return sourceProducts.slice(0, 8);
     return sourceProducts.filter((p) => [p.product_name, p.serial_number, p.brand, p.model, p.product_code].some((v) => v?.toLowerCase().includes(search))).slice(0, 12);
-  }, [productSearchTerm, products]);
+  }, [orderForm.product_ids, productSearchTerm, products]);
   const filteredClients = useMemo(() => {
     const search = clientSearchTerm.trim().toLowerCase();
-    if (!search) return clientsForDropdown.slice(0, 8);
+    if (!search) return clientsForDropdown;
     return clientsForDropdown
       .filter((client) =>
         [client.full_name, client.phone, client.email]
           .some((value) => value?.toLowerCase().includes(search)),
-      )
-      .slice(0, 12);
+      );
   }, [clientSearchTerm, clientsForDropdown]);
   const filteredReplacementProducts = useMemo(() => {
     const search = replacementSearchTerm.trim().toLowerCase();
-    const sourceProducts = products.filter((p) => Boolean(Number(p.is_spare_product || 0)));
+    const selectedIds = new Set(orderForm.replacement_product_ids.map((id) => id.toString()));
+    const sourceProducts = products.filter((p) => isSpareProduct(p) && !selectedIds.has(p.id.toString()));
     if (!search) return sourceProducts.slice(0, 8);
     return sourceProducts.filter((p) => [p.product_name, p.serial_number, p.brand, p.model, p.product_code].some((v) => v?.toLowerCase().includes(search))).slice(0, 12);
-  }, [replacementSearchTerm, products]);
+  }, [orderForm.replacement_product_ids, replacementSearchTerm, products]);
   const shouldShowProductDropdown = showProductDropdown;
   const shouldShowClientDropdown = showClientDropdown;
   const shouldShowReplacementDropdown = showReplacementDropdown && showReplacementProducts;
 
-  const selectedProduct = useMemo(() => orderForm.product_id ? products.find((p) => p.id.toString() === orderForm.product_id) || null : null, [orderForm.product_id, products]);
-  const selectedReplacementProduct = useMemo(() => orderForm.replacement_product_id ? products.find((p) => p.id.toString() === orderForm.replacement_product_id) || null : null, [orderForm.replacement_product_id, products]);
+  const selectedProducts = useMemo(() => orderForm.product_ids.map((id) => products.find((p) => p.id.toString() === id)).filter(Boolean) as Product[], [orderForm.product_ids, products]);
+  const selectedReplacementProducts = useMemo(() => orderForm.replacement_product_ids.map((id) => products.find((p) => p.id.toString() === id)).filter(Boolean) as Product[], [orderForm.replacement_product_ids, products]);
+  const selectedProduct = selectedProducts[0] || null;
+  const selectedReplacementProduct = selectedReplacementProducts[0] || null;
+  const productPreview = selectedProduct
+    ? `${selectedProduct.product_name}${selectedProducts.length > 1 ? ` +${selectedProducts.length - 1}` : ""}`
+    : orderForm.product_name || "Choose a product for service";
+  const replacementPreview = selectedReplacementProduct
+    ? `${selectedReplacementProduct.product_name}${selectedReplacementProducts.length > 1 ? ` +${selectedReplacementProducts.length - 1}` : ""}`
+    : "";
+  const previewPrimaryItems = selectedProducts.map((product) =>
+    product.serial_number ? `${product.product_name} (SN: ${product.serial_number})` : product.product_name,
+  );
+  const previewReplacementItems = selectedReplacementProducts.map((product) =>
+    product.serial_number ? `${product.product_name} (SN: ${product.serial_number})` : product.product_name,
+  );
   const estimatedCost = Number.parseFloat(orderForm.estimated_cost || "0") || 0;
   const depositAmount = Number.parseFloat(orderForm.deposit_amount || "0") || 0;
   const finalCost = Number.parseFloat(orderForm.final_cost || orderForm.estimated_cost || "0") || 0;
   const remainingBalance = Math.max(estimatedCost - depositAmount, 0);
-  const completionCount = [orderForm.client_id, orderForm.client_phone, orderForm.product_id, orderForm.staff_id, orderForm.issue_description, orderForm.estimated_cost, orderForm.status, orderForm.priority].filter((v) => String(v || "").trim().length > 0).length;
+  const completionCount = [orderForm.client_id, orderForm.client_phone, orderForm.product_ids.length > 0 ? "filled" : "", orderForm.staff_id, orderForm.issue_description, orderForm.estimated_cost, orderForm.status, orderForm.priority].filter((v) => String(v || "").trim().length > 0).length;
 
   const getPriorityColor = (priority: string) => ({ urgent: "#ef4444", high: "#f59e0b", medium: "#3b82f6", low: "#10b981" }[priority] || "#10b981");
   const getStatusColor = (status: string) => ({ completed: "#10b981", process: "#3b82f6", scheduled: "#8b5cf6", ready: "#06b6d4", delivered: "#6366f1", cancelled: "#ef4444", pending: "#f59e0b" }[status] || "#f59e0b");
-  const triggerReplacementChange = (productId: string) => onChange({ target: { name: "replacement_product_id", value: productId } } as ChangeEvent<HTMLInputElement>);
+  const addProduct = (productId: string) => {
+    const normalizedProductId = productId.trim();
+    if (!normalizedProductId || orderForm.product_ids.includes(normalizedProductId)) return;
+    onProductsChange([...orderForm.product_ids, normalizedProductId]);
+  };
+  const removeProduct = (productId: string) => {
+    onProductsChange(orderForm.product_ids.filter((id) => id !== productId));
+  };
+  const addReplacementProduct = (productId: string) => {
+    const normalizedProductId = productId.trim();
+    if (!normalizedProductId || orderForm.replacement_product_ids.includes(normalizedProductId)) return;
+    onReplacementProductsChange([...orderForm.replacement_product_ids, normalizedProductId]);
+  };
+  const removeReplacementProduct = (productId: string) => {
+    onReplacementProductsChange(orderForm.replacement_product_ids.filter((id) => id !== productId));
+  };
 
   if (!show) return null;
 
@@ -115,12 +157,24 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
                 <div className="order-preview-card">
                   <span className="order-preview-badge">{editMode ? "Live Order Snapshot" : "New Order Snapshot"}</span>
                   <h3>{selectedClient?.full_name || "Select a client"}</h3>
-                  <p>{selectedProduct?.product_name || orderForm.product_name || "Choose a product for service"}</p>
+                  <p>{productPreview}</p>
+                  {previewPrimaryItems.length > 0 && (
+                    <p className="order-preview-products" title={previewPrimaryItems.join(", ")}>
+                      Products: {previewPrimaryItems.join(", ")}
+                    </p>
+                  )}
                   <div className="order-preview-meta">
                     <span>{orderForm.client_phone || "Phone pending"}</span>
                     <span>{selectedStaff?.name || "No staff assigned"}</span>
                     <span>{orderForm.estimated_delivery_date || "No delivery date"}</span>
-                    {selectedReplacementProduct && <span>Replacement: {selectedReplacementProduct.product_name}</span>}
+                    {(selectedReplacementProduct || orderForm.replacement_product_name) && (
+                      <span>Replacement: {replacementPreview || orderForm.replacement_product_name}</span>
+                    )}
+                    {previewReplacementItems.length > 0 && (
+                      <span title={previewReplacementItems.join(", ")}>
+                        Replacement List: {previewReplacementItems.join(", ")}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="order-progress-card">
@@ -182,13 +236,13 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
                     <div className="product-search-container">
                       <div className="search-wrapper">
                         <FiSearch className="search-icon-enhanced" />
-                        <input type="text" id="product_search" value={productSearchTerm} onChange={(e) => { setProductSearchTerm(e.target.value); onProductSelect(""); setShowProductDropdown(true); }} onFocus={() => setShowProductDropdown(true)} placeholder="Type to search products by name, serial, brand, or model" className="product-search-input" autoComplete="off" />
-                        {productSearchTerm && <button type="button" className="clear-search" onClick={() => { setProductSearchTerm(""); onProductSelect(""); setShowProductDropdown(false); }}><FiX /></button>}
+                        <input type="text" id="product_search" value={productSearchTerm} onChange={(e) => { setProductSearchTerm(e.target.value); setShowProductDropdown(true); }} onFocus={() => setShowProductDropdown(true)} placeholder="Type to search products by name, serial, brand, or model" className="product-search-input" autoComplete="off" />
+                        {productSearchTerm && <button type="button" className="clear-search" onClick={() => { setProductSearchTerm(""); setShowProductDropdown(false); }}><FiX /></button>}
                       </div>
                       {!productSearchTerm.trim() && <div className="input-hint info"><FiSearch /> Product list opens automatically</div>}
                       <AnimatePresence>
                         {shouldShowProductDropdown && <motion.div className="product-dropdown-enhanced" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }}>
-                          {filteredProducts.length > 0 ? filteredProducts.map((product, index) => <motion.button key={product.id} type="button" className="product-item" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: index * 0.03 }} onClick={() => { setProductSearchTerm(product.product_name); onProductSelect(product.id.toString()); setShowProductDropdown(false); }}>
+                          {filteredProducts.length > 0 ? filteredProducts.map((product, index) => <motion.button key={product.id} type="button" className="product-item" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: index * 0.03 }} onClick={() => { addProduct(product.id.toString()); setProductSearchTerm(""); setShowProductDropdown(false); }}>
                             <div className="product-item-icon"><FiPackage /></div>
                             <div className="product-item-info">
                               <div className="product-item-name">{product.product_name}</div>
@@ -198,12 +252,45 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
                                 {product.model && <span className="product-model">{product.model}</span>}
                               </div>
                             </div>
-                            {orderForm.product_id === product.id.toString() && <FiCheck className="product-check" />}
+                            {orderForm.product_ids.includes(product.id.toString()) && <FiCheck className="product-check" />}
                           </motion.button>) : <div className="no-products"><FiAlertCircle /><span>No matching products found</span></div>}
                         </motion.div>}
                       </AnimatePresence>
                     </div>
-                    {selectedProduct && <div className="selected-info">{selectedProduct.serial_number && <div className="info-chip"><span>SN: {selectedProduct.serial_number}</span></div>}{selectedProduct.brand && <div className="info-chip"><span>{selectedProduct.brand}</span></div>}{selectedProduct.model && <div className="info-chip"><span>{selectedProduct.model}</span></div>}</div>}
+                    {selectedProducts.length > 0 ? (
+                      <div className="selected-products-box">
+                        <div className="selected-products-header">
+                          <div className="selected-products-title">
+                            <strong>Selected Products</strong>
+                            <span>{selectedProducts.length} item{selectedProducts.length > 1 ? "s" : ""} added</span>
+                          </div>
+                          <button type="button" className="selected-products-clear" onClick={() => onProductsChange([])}>
+                            Clear all
+                          </button>
+                        </div>
+                        <div className="selected-products-grid">
+                          {selectedProducts.map((product, index) => (
+                            <div key={product.id} className="selected-product-card">
+                              <div className="selected-product-index">{index + 1}</div>
+                              <div className="selected-product-content">
+                                <div className="selected-product-name">{product.product_name}</div>
+                                <div className="selected-product-meta">
+                                  {product.product_code && <span>Code: {product.product_code}</span>}
+                                  {product.serial_number && <span>SN: {product.serial_number}</span>}
+                                  {product.brand && <span>{product.brand}</span>}
+                                  {product.model && <span>{product.model}</span>}
+                                </div>
+                              </div>
+                              <button type="button" className="selected-product-remove" onClick={() => removeProduct(product.id.toString())}>
+                                <FiX />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="input-hint info"><FiCheck /> Select at least one product</div>
+                    )}
                   </div>
 
                   <div className="form-group-enhanced">
@@ -217,7 +304,7 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
                           setShowReplacementDropdown(e.target.checked);
                           if (!e.target.checked) {
                             setReplacementSearchTerm("");
-                            triggerReplacementChange("");
+                            onReplacementProductsChange([]);
                           }
                         }}
                       />
@@ -226,22 +313,22 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
                       </span>
                       <span className="order-replacement-toggle-copy">
                         <strong>Replacement Product</strong>
-                        <small>{showReplacementProducts ? "Showing spare products only" : "Turn on to pick from spare products"}</small>
+                        <small>{showReplacementProducts ? "Showing spare products only. You can add multiple items." : "Turn on to pick from spare products"}</small>
                       </span>
                     </label>
                     {showReplacementProducts && (
                       <div className="product-search-container">
                         <div className="search-wrapper">
                           <FiSearch className="search-icon-enhanced" />
-                          <input type="text" id="replacement_product_search" value={replacementSearchTerm} onChange={(e) => { setReplacementSearchTerm(e.target.value); triggerReplacementChange(""); setShowReplacementDropdown(true); }} onFocus={() => setShowReplacementDropdown(true)} placeholder="Search spare products by name, serial, brand, or model" className="product-search-input" autoComplete="off" />
-                          {replacementSearchTerm && <button type="button" className="clear-search" onClick={() => { setReplacementSearchTerm(""); triggerReplacementChange(""); setShowReplacementDropdown(false); }}><FiX /></button>}
+                          <input type="text" id="replacement_product_search" value={replacementSearchTerm} onChange={(e) => { setReplacementSearchTerm(e.target.value); setShowReplacementDropdown(true); }} onFocus={() => setShowReplacementDropdown(true)} placeholder="Search spare products by name, serial, brand, or model" className="product-search-input" autoComplete="off" />
+                          {replacementSearchTerm && <button type="button" className="clear-search" onClick={() => { setReplacementSearchTerm(""); setShowReplacementDropdown(false); }}><FiX /></button>}
                         </div>
                         <div className="input-hint info">
-                          <FiCheck /> Spare products only are shown in this dropdown
+                          <FiCheck /> Spare products only are shown. Select multiple items one by one.
                         </div>
                         <AnimatePresence>
                           {shouldShowReplacementDropdown && <motion.div className="product-dropdown-enhanced" initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }}>
-                            {filteredReplacementProducts.length > 0 ? filteredReplacementProducts.map((product, index) => <motion.button key={product.id} type="button" className="product-item" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: index * 0.03 }} onClick={() => { setReplacementSearchTerm(product.product_name); triggerReplacementChange(product.id.toString()); setShowReplacementDropdown(false); }}>
+                            {filteredReplacementProducts.length > 0 ? filteredReplacementProducts.map((product, index) => <motion.button key={product.id} type="button" className="product-item" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: index * 0.03 }} onClick={() => { addReplacementProduct(product.id.toString()); setReplacementSearchTerm(""); setShowReplacementDropdown(true); }}>
                               <div className="product-item-icon"><FiPackage /></div>
                               <div className="product-item-info">
                                 <div className="product-item-name">{product.product_name}</div>
@@ -252,13 +339,45 @@ const OrderFormModal = ({ show, editMode, orderForm, users, clientsForDropdown, 
                                   <span className="product-brand">Spare</span>
                                 </div>
                               </div>
-                              {orderForm.replacement_product_id === product.id.toString() && <FiCheck className="product-check" />}
+                              {orderForm.replacement_product_ids.includes(product.id.toString()) && <FiCheck className="product-check" />}
                             </motion.button>) : <div className="no-products"><FiAlertCircle /><span>No matching spare products found</span></div>}
                           </motion.div>}
                         </AnimatePresence>
                       </div>
                     )}
-                    {selectedReplacementProduct && <div className="selected-info">{selectedReplacementProduct.serial_number && <div className="info-chip"><span>SN: {selectedReplacementProduct.serial_number}</span></div>}{selectedReplacementProduct.brand && <div className="info-chip"><span>{selectedReplacementProduct.brand}</span></div>}{selectedReplacementProduct.model && <div className="info-chip"><span>{selectedReplacementProduct.model}</span></div>}{Boolean(Number(selectedReplacementProduct.is_spare_product || 0)) && <div className="info-chip"><span>Spare Product</span></div>}</div>}
+                    {selectedReplacementProducts.length > 0 && (
+                      <div className="selected-products-box replacement">
+                        <div className="selected-products-header">
+                          <div className="selected-products-title">
+                            <strong>Replacement Products</strong>
+                            <span>{selectedReplacementProducts.length} item{selectedReplacementProducts.length > 1 ? "s" : ""} selected</span>
+                          </div>
+                          <button type="button" className="selected-products-clear" onClick={() => onReplacementProductsChange([])}>
+                            Clear all
+                          </button>
+                        </div>
+                        <div className="selected-products-grid">
+                          {selectedReplacementProducts.map((product, index) => (
+                            <div key={product.id} className="selected-product-card">
+                              <div className="selected-product-index">{index + 1}</div>
+                              <div className="selected-product-content">
+                                <div className="selected-product-name">{product.product_name}</div>
+                                <div className="selected-product-meta">
+                                  {product.product_code && <span>Code: {product.product_code}</span>}
+                                  {product.serial_number && <span>SN: {product.serial_number}</span>}
+                                  {product.brand && <span>{product.brand}</span>}
+                                  {product.model && <span>{product.model}</span>}
+                                  <span>Spare</span>
+                                </div>
+                              </div>
+                              <button type="button" className="selected-product-remove" onClick={() => removeReplacementProduct(product.id.toString())}>
+                                <FiX />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="form-group-enhanced">

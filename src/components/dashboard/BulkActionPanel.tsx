@@ -93,7 +93,7 @@ const BulkActionPanel = ({
           <div className="data-action-group-buttons">
             <button type="button" className="btn outline data-action-btn" onClick={onExportCSV} disabled={disableActions}>
               <FiDownload />
-              <span>Export CSV</span>
+              <span>Export Excel</span>
             </button>
             <button type="button" className="btn outline data-action-btn" onClick={onExportPDF} disabled={disableActions}>
               <FiFileText />

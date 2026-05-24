@@ -14,11 +14,12 @@ import {
   FiUsers,
   FiX,
 } from "react-icons/fi";
-import type { Order } from "../types";
+import type { Order, Product } from "../types";
 import { formatCurrency, formatDisplayDate, getBalanceDue } from "../utils";
 
 interface OrderDetailModalProps {
   order: Order;
+  products?: Product[];
   getStatusColor: (status: string) => string;
   getPriorityColor: (priority: string) => string;
   getWarrantyColor: (warranty: string) => string;
@@ -35,8 +36,133 @@ const prettify = (value?: string) =>
     .replaceAll("_", " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
 
+const parseJsonArray = (value: string): unknown[] | null => {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeNames = (value: unknown) =>
+  Array.from(
+    new Set(
+      (
+        Array.isArray(value)
+          ? value
+          : typeof value === "number"
+            ? [value]
+          : typeof value === "string"
+            ? parseJsonArray(value.trim()) ??
+              (value.includes("||") ? value.split("||") : value.split(","))
+            : []
+      )
+        .map((name) => String(name ?? "").trim())
+        .filter((name): name is string => {
+          const normalized = name.toLowerCase();
+          return Boolean(normalized) && normalized !== "null" && normalized !== "undefined";
+        }),
+    ),
+  );
+
+const normalizeIds = (value: unknown) =>
+  Array.from(
+    new Set(
+      (
+        Array.isArray(value)
+          ? value
+          : typeof value === "number"
+            ? [value]
+            : typeof value === "string"
+              ? parseJsonArray(value.trim()) ?? value.split(",")
+              : []
+      )
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ),
+  );
+
+const withIdFallback = (names: string[], ids: number[], labelPrefix: string) => {
+  if (names.length > 0) return names;
+  return ids.map((id) => `${labelPrefix} #${id}`);
+};
+
+interface ProductEntry {
+  label: string;
+  serialNumber: string;
+}
+
+const buildOrderProductEntries = (
+  order: Order,
+  products: Product[],
+  isReplacement: boolean,
+): ProductEntry[] => {
+  const ids = normalizeIds([
+    ...(isReplacement ? normalizeIds(order.replacement_product_ids) : normalizeIds(order.product_ids)),
+    ...(isReplacement ? normalizeIds(order.replacement_product_id) : normalizeIds(order.product_id)),
+  ]);
+  const namesFromList = isReplacement ? normalizeNames(order.replacement_product_names) : normalizeNames(order.product_names);
+  const fallbackNames = isReplacement ? normalizeNames(order.replacement_product_name) : normalizeNames(order.product_name);
+  const names = namesFromList.length > 0 ? namesFromList : fallbackNames;
+  const serials = normalizeNames(
+    isReplacement ? order.replacement_product_serial_numbers : order.product_serial_numbers,
+  );
+  const fallbackSerial = (isReplacement ? order.replacement_serial_number : order.serial_number) || "";
+
+  const entries = ids.map((id, index) => {
+    const matched = products.find((product) => product.id === id);
+    return {
+      label:
+        names[index] ||
+        matched?.product_name ||
+        `${isReplacement ? "Replacement Product" : "Product"} #${id}`,
+      serialNumber: serials[index] || matched?.serial_number || (index === 0 ? fallbackSerial : "") || "",
+    };
+  });
+
+  if (entries.length > 0) return entries;
+
+  return withIdFallback(names, ids, isReplacement ? "Replacement Product" : "Product").map((label, index) => ({
+    label,
+    serialNumber: serials[index] || (index === 0 ? fallbackSerial : "") || "",
+  }));
+};
+
+const renderProductCollection = (entries: ProductEntry[], emptyLabel: string) => {
+  if (!entries.length) {
+    return <span className="order-detail-product-empty">{emptyLabel}</span>;
+  }
+
+  return (
+    <div className="order-detail-product-value">
+      <span className="order-detail-product-count">
+        {entries.length} item{entries.length > 1 ? "s" : ""}
+      </span>
+      <div className="order-detail-product-list">
+        {entries.map((entry, index) => (
+          <div
+            key={`${entry.label}-${index}`}
+            className="order-detail-product-list-item"
+            title={entry.serialNumber ? `${entry.label} (SN: ${entry.serialNumber})` : entry.label}
+          >
+            <span className="order-detail-product-index">{index + 1}.</span>
+            <div className="order-detail-product-text">
+              <span className="order-detail-product-name">{entry.label}</span>
+              <span className="order-detail-product-serial">
+                Serial Number: {entry.serialNumber || "Not available"}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const OrderDetailModal = ({
   order,
+  products = [],
   getStatusColor,
   getPriorityColor,
   getWarrantyColor,
@@ -50,6 +176,25 @@ const OrderDetailModal = ({
   const finalAmount = formatCurrency(order.final_cost || order.estimated_cost);
   const depositAmount = formatCurrency(order.deposit_amount);
   const balanceDue = getBalanceDue(order.final_cost, order.estimated_cost, order.deposit_amount);
+  const productEntries = buildOrderProductEntries(order, products, false);
+  const replacementEntries = buildOrderProductEntries(order, products, true);
+  const productSummary = productEntries.length > 1
+    ? `${productEntries[0].label} +${productEntries.length - 1} more`
+    : (productEntries[0]?.label || "Not added");
+  const productFullList = productEntries.length
+    ? productEntries
+      .map((entry) => (entry.serialNumber ? `${entry.label} (SN: ${entry.serialNumber})` : entry.label))
+      .join(", ")
+    : "Not added";
+  const replacementFullList = replacementEntries.length
+    ? replacementEntries
+      .map((entry) => (entry.serialNumber ? `${entry.label} (SN: ${entry.serialNumber})` : entry.label))
+      .join(", ")
+    : "Not added";
+  const productCountLabel = productEntries.length ? `${productEntries.length} product${productEntries.length > 1 ? "s" : ""}` : "No product";
+  const replacementCountLabel = replacementEntries.length
+    ? `${replacementEntries.length} replacement item${replacementEntries.length > 1 ? "s" : ""}`
+    : "No replacement product";
 
   return (
     <motion.div
@@ -72,8 +217,8 @@ const OrderDetailModal = ({
             <div className="order-detail-kicker">Service Order</div>
             <div className="modal-title">
               <h2>{order.order_code}</h2>
-              <p>
-                {order.client_name} | {order.product_name}
+              <p title={productFullList}>
+                {order.client_name} | {productSummary}
               </p>
             </div>
           </div>
@@ -109,8 +254,10 @@ const OrderDetailModal = ({
               <div className="order-detail-hero-icon"><FiPackage /></div>
               <div>
                 <span className="order-detail-hero-label">Product</span>
-                <strong>{order.product_name}</strong>
-                <p>{order.replacement_product_name ? `Replacement: ${order.replacement_product_name}` : "No replacement product"}</p>
+                <strong title={productFullList}>{productSummary}</strong>
+                <p title={replacementFullList}>
+                  {productCountLabel} | {replacementCountLabel}
+                </p>
               </div>
             </div>
             <div className="order-detail-hero-card">
@@ -153,9 +300,9 @@ const OrderDetailModal = ({
             </div>
 
             <div className="detail-section">
-              <h3><FiPackage /> Product Details</h3>
-              <div className="detail-item"><span className="detail-label">Main Product</span><span className="detail-value">{order.product_name}</span></div>
-              <div className="detail-item"><span className="detail-label">Replacement Product</span><span className="detail-value">{order.replacement_product_name || "Not added"}</span></div>
+              <h3><FiPackage /> Product Information</h3>
+              <div className="detail-item"><span className="detail-label">Main Products</span>{renderProductCollection(productEntries, "Not added")}</div>
+              <div className="detail-item"><span className="detail-label">Replacement Products</span>{renderProductCollection(replacementEntries, "Not added")}</div>
               <div className="detail-item"><span className="detail-label">Brand</span><span className="detail-value">{order.product_brand || "N/A"}</span></div>
               <div className="detail-item"><span className="detail-label">Model</span><span className="detail-value">{order.product_model || "N/A"}</span></div>
             </div>
