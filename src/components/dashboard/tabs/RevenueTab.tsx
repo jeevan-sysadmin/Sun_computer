@@ -88,7 +88,7 @@ interface RevenueResponse {
   message?: string;
 }
 
-const API_BASE_URL = "http://localhost/sun_computers/api";
+const API_BASE_URL = "http://cloud.anyrdp.in:3001/sun_computers/api";
 const serviceTypeOptions = ["all", "general", "repair", "sales", "water", "inverter"];
 
 const todayString = () => new Date().toISOString().split("T")[0];

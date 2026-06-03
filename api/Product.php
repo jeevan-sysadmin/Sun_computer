@@ -18,63 +18,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit();
 }
 
-function splitSerialInputValues($value) {
-    if ($value === null) {
-        return [];
-    }
-
-    $raw = trim((string)$value);
-    if ($raw === '') {
-        return [];
-    }
-
-    $parts = preg_split('/[\r\n\t,;|]+/', $raw);
-    if (!$parts) {
-        return [];
-    }
-
-    $serials = [];
-    $seen = [];
-
-    foreach ($parts as $part) {
-        $normalized = preg_replace('/\s+/', '', trim((string)$part));
-        if ($normalized === '') {
-            continue;
-        }
-        if (isset($seen[$normalized])) {
-            continue;
-        }
-        $seen[$normalized] = true;
-        $serials[] = $normalized;
-    }
-
-    return $serials;
-}
-
-function expandProductRowsBySerial($row) {
-    if (!is_array($row)) {
-        return [];
-    }
-
-    $serials = array_key_exists('serial_number', $row)
-        ? splitSerialInputValues($row['serial_number'])
-        : [];
-
-    if (count($serials) <= 1) {
-        $row['serial_number'] = count($serials) === 1 ? $serials[0] : '';
-        return [$row];
-    }
-
-    $expandedRows = [];
-    foreach ($serials as $serial) {
-        $copy = $row;
-        $copy['serial_number'] = $serial;
-        $expandedRows[] = $copy;
-    }
-
-    return $expandedRows;
-}
-
 function normalizeProductPayloadAliases($row) {
     if (!is_array($row)) {
         return $row;
@@ -90,12 +33,24 @@ function normalizeProductPayloadAliases($row) {
         }
     }
 
+    if ((!array_key_exists('serial_number', $row) || trim((string)$row['serial_number']) === '')) {
+        $serialAliasKeys = ['serialNumber', 'serial_no', 'serialNo', 'serial'];
+        foreach ($serialAliasKeys as $aliasKey) {
+            if (isset($row[$aliasKey]) && trim((string)$row[$aliasKey]) !== '') {
+                $row['serial_number'] = trim((string)$row[$aliasKey]);
+                break;
+            }
+        }
+    } elseif (isset($row['serial_number'])) {
+        $row['serial_number'] = trim((string)$row['serial_number']);
+    }
+
     return $row;
 }
 
 // Database class
 class Database {
-    private $host = "localhost";
+    private $host = "cloud.anyrdp.in:3001";
     private $db_name = "sun_computers";
     private $username = "root";
     private $password = "";
@@ -150,8 +105,8 @@ class Product {
     }
 
     private function normalizeSerialNumber($serial_number) {
-        $serial_number = trim((string)$serial_number);
-        return preg_replace('/\s+/', '', $serial_number);
+        $serial_number = str_replace(["\r\n", "\r"], "\n", (string)$serial_number);
+        return trim($serial_number);
     }
 
     private function normalizedSerialSql($columnName = 'serial_number') {
@@ -300,6 +255,10 @@ class Product {
         // Validate inputs
         $this->serial_number = $this->normalizeSerialNumber($this->serial_number);
         $this->product_name = trim($this->product_name);
+
+        if ($this->serial_number === '') {
+            return ['success' => false, 'message' => 'Serial number is required'];
+        }
         
         // Check if serial number already exists
         if (!empty($this->serial_number) && $this->checkSerialNumberExists($this->serial_number)) {
@@ -315,7 +274,7 @@ class Product {
         $this->category = $this->validateCategory($this->category);
         $this->claim_type = $this->validateClaimType($this->claim_type);
         $this->specifications = !empty($this->specifications) ? trim($this->specifications) : null;
-        $this->serial_number = !empty($this->serial_number) ? $this->serial_number : null;
+        $this->serial_number = $this->serial_number;
         $this->purchase_date = !empty($this->purchase_date) ? $this->purchase_date : null;
         $this->warranty_period = !empty($this->warranty_period) ? trim($this->warranty_period) : null;
         $this->price = !empty($this->price) ? floatval($this->price) : 0;
@@ -546,16 +505,6 @@ try {
 
             $isBatch = isset($input['products']) && is_array($input['products']);
 
-            if (!$isBatch) {
-                $expandedInputRows = expandProductRowsBySerial($input);
-                if (count($expandedInputRows) > 1) {
-                    $isBatch = true;
-                    $input = ['products' => $expandedInputRows];
-                } elseif (count($expandedInputRows) === 1) {
-                    $input = $expandedInputRows[0];
-                }
-            }
-
             if ($isBatch) {
                 $rawRows = $input['products'];
                 if (count($rawRows) === 0) {
@@ -575,11 +524,8 @@ try {
                     }
 
                     $row = normalizeProductPayloadAliases($row);
-                    $expandedRows = expandProductRowsBySerial($row);
-                    foreach ($expandedRows as $expandedRow) {
-                        $expandedRow['__source_index'] = $index;
-                        $rows[] = $expandedRow;
-                    }
+                    $row['__source_index'] = $index;
+                    $rows[] = $row;
                 }
 
                 foreach ($rows as $index => $row) {
@@ -587,6 +533,10 @@ try {
 
                     if (empty($row['product_name']) || trim((string)$row['product_name']) === '') {
                         $errors[] = ["index" => $sourceIndex, "message" => "Product name is required"];
+                        continue;
+                    }
+                    if (!isset($row['serial_number']) || trim((string)$row['serial_number']) === '') {
+                        $errors[] = ["index" => $sourceIndex, "message" => "Serial number is required"];
                         continue;
                     }
 
@@ -657,6 +607,12 @@ try {
                 break;
             }
 
+            if (!isset($input['serial_number']) || trim((string)$input['serial_number']) === '') {
+                http_response_code(400);
+                echo json_encode(["success" => false, "message" => "Serial number is required"]);
+                break;
+            }
+
             // Set product properties
             $product->serial_number = isset($input['serial_number']) ? $input['serial_number'] : '';
             $product->is_spare_product = isset($input['is_spare_product']) ? $input['is_spare_product'] : 0;
@@ -709,19 +665,6 @@ try {
 
             $input = normalizeProductPayloadAliases($input);
 
-            if (isset($input['serial_number'])) {
-                $serialEntries = splitSerialInputValues($input['serial_number']);
-                if (count($serialEntries) > 1) {
-                    http_response_code(400);
-                    echo json_encode([
-                        "success" => false,
-                        "message" => "Only one serial number is allowed while editing a product"
-                    ]);
-                    break;
-                }
-                $input['serial_number'] = count($serialEntries) === 1 ? $serialEntries[0] : '';
-            }
-            
             // Verify product exists
             $existingProduct = $product->getById($id);
             if(!$existingProduct) {

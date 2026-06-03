@@ -33,12 +33,42 @@ function normalizeProductPayloadAliases($row) {
         }
     }
 
+    if ((!array_key_exists('serial_number', $row) || trim((string)$row['serial_number']) === '')) {
+        $serialAliasKeys = ['serialNumber', 'serial_no', 'serialNo', 'serial'];
+        foreach ($serialAliasKeys as $aliasKey) {
+            if (isset($row[$aliasKey]) && trim((string)$row[$aliasKey]) !== '') {
+                $row['serial_number'] = trim((string)$row[$aliasKey]);
+                break;
+            }
+        }
+    } elseif (isset($row['serial_number'])) {
+        $row['serial_number'] = trim((string)$row['serial_number']);
+    }
+
     return $row;
+}
+
+function splitSerialNumbers($serialInput) {
+    $serialInput = trim((string)$serialInput);
+    if ($serialInput === '') {
+        return [];
+    }
+
+    $parts = preg_split('/\s+/', $serialInput);
+    $serials = [];
+    foreach ($parts as $part) {
+        $value = trim((string)$part);
+        if ($value !== '') {
+            $serials[] = $value;
+        }
+    }
+
+    return array_values(array_unique($serials));
 }
 
 // Database class
 class Database {
-    private $host = "localhost";
+    private $host = "cloud.anyrdp.in:3001";
     private $db_name = "sun_computers";
     private $username = "root";
     private $password = "";
@@ -93,8 +123,8 @@ class Product {
     }
 
     private function normalizeSerialNumber($serial_number) {
-        $serial_number = trim((string)$serial_number);
-        return preg_replace('/\s+/', '', $serial_number);
+        $serial_number = str_replace(["\r\n", "\r"], "\n", (string)$serial_number);
+        return trim($serial_number);
     }
     
     // Validate claim type
@@ -201,6 +231,10 @@ class Product {
         // Validate inputs
         $this->serial_number = $this->normalizeSerialNumber($this->serial_number);
         $this->product_name = trim($this->product_name);
+
+        if ($this->serial_number === '') {
+            return ['success' => false, 'message' => 'Serial number is required'];
+        }
         
         // Check if serial number already exists
         if (!empty($this->serial_number) && $this->checkSerialNumberExists($this->serial_number)) {
@@ -216,7 +250,7 @@ class Product {
         $this->category = $this->validateCategory($this->category);
         $this->claim_type = $this->validateClaimType($this->claim_type);
         $this->specifications = !empty($this->specifications) ? trim($this->specifications) : null;
-        $this->serial_number = !empty($this->serial_number) ? $this->serial_number : null;
+        $this->serial_number = $this->serial_number;
         $this->purchase_date = !empty($this->purchase_date) ? $this->purchase_date : null;
         $this->warranty_period = !empty($this->warranty_period) ? trim($this->warranty_period) : null;
         $this->price = !empty($this->price) ? floatval($this->price) : 0;
@@ -444,6 +478,10 @@ try {
                         $errors[] = ["index" => $index, "message" => "Product name is required"];
                         continue;
                     }
+                    if (!isset($row['serial_number']) || trim((string)$row['serial_number']) === '') {
+                        $errors[] = ["index" => $index, "message" => "Serial number is required"];
+                        continue;
+                    }
 
                     $product->serial_number = isset($row['serial_number']) ? $row['serial_number'] : '';
                     $product->is_spare_product = isset($row['is_spare_product']) ? $row['is_spare_product'] : 0;
@@ -511,35 +549,81 @@ try {
                 echo json_encode(["success" => false, "message" => "Product name is required"]);
                 break;
             }
-
-            // Set product properties
-            $product->serial_number = isset($input['serial_number']) ? $input['serial_number'] : '';
-            $product->is_spare_product = isset($input['is_spare_product']) ? $input['is_spare_product'] : 0;
-            $product->product_name = $input['product_name'];
-            $product->brand = isset($input['brand']) ? $input['brand'] : '';
-            $product->model = isset($input['model']) ? $input['model'] : '';
-            $product->category = isset($input['category']) ? $input['category'] : 'other';
-            $product->claim_type = isset($input['claim_type']) ? $input['claim_type'] : 'none';
-            $product->specifications = isset($input['specifications']) ? $input['specifications'] : '';
-            $product->purchase_date = isset($input['purchase_date']) ? $input['purchase_date'] : null;
-            $product->warranty_period = isset($input['warranty_period']) ? $input['warranty_period'] : '';
-            $product->price = isset($input['price']) ? $input['price'] : 0;
-            $product->status = isset($input['status']) ? $input['status'] : 'active';
-
-            $result = $product->create();
-
-            if($result['success']) {
-                http_response_code(201);
-                echo json_encode([
-                    "success" => true,
-                    "message" => $result['message'],
-                    "product_id" => $result['product_id'],
-                    "product_code" => $result['product_code']
-                ]);
-            } else {
+            if (!isset($input['serial_number']) || trim((string)$input['serial_number']) === '') {
                 http_response_code(400);
-                echo json_encode(["success" => false, "message" => $result['message']]);
+                echo json_encode(["success" => false, "message" => "Serial number is required"]);
+                break;
             }
+
+            $serialNumbers = splitSerialNumbers($input['serial_number']);
+            if (count($serialNumbers) === 0) {
+                http_response_code(400);
+                echo json_encode(["success" => false, "message" => "Serial number is required"]);
+                break;
+            }
+
+            $createdProducts = [];
+            $errors = [];
+
+            foreach ($serialNumbers as $serialNumber) {
+                // Set product properties
+                $product->serial_number = $serialNumber;
+                $product->is_spare_product = isset($input['is_spare_product']) ? $input['is_spare_product'] : 0;
+                $product->product_name = $input['product_name'];
+                $product->brand = isset($input['brand']) ? $input['brand'] : '';
+                $product->model = isset($input['model']) ? $input['model'] : '';
+                $product->category = isset($input['category']) ? $input['category'] : 'other';
+                $product->claim_type = isset($input['claim_type']) ? $input['claim_type'] : 'none';
+                $product->specifications = isset($input['specifications']) ? $input['specifications'] : '';
+                $product->purchase_date = isset($input['purchase_date']) ? $input['purchase_date'] : null;
+                $product->warranty_period = isset($input['warranty_period']) ? $input['warranty_period'] : '';
+                $product->price = isset($input['price']) ? $input['price'] : 0;
+                $product->status = isset($input['status']) ? $input['status'] : 'active';
+
+                $result = $product->create();
+                if ($result['success']) {
+                    $createdProducts[] = [
+                        "serial_number" => $serialNumber,
+                        "product_id" => $result['product_id'],
+                        "product_code" => $result['product_code']
+                    ];
+                } else {
+                    $errors[] = [
+                        "serial_number" => $serialNumber,
+                        "message" => $result['message']
+                    ];
+                }
+            }
+
+            $createdCount = count($createdProducts);
+            $failedCount = count($errors);
+
+            if ($createdCount === 0) {
+                http_response_code(400);
+                echo json_encode([
+                    "success" => false,
+                    "message" => "No products were created",
+                    "created_count" => 0,
+                    "failed_count" => $failedCount,
+                    "errors" => $errors
+                ]);
+                break;
+            }
+
+            $allSuccess = $failedCount === 0;
+            http_response_code($allSuccess ? 201 : 207);
+            echo json_encode([
+                "success" => $allSuccess,
+                "partial" => !$allSuccess,
+                "message" => $allSuccess
+                    ? "Products created successfully"
+                    : "Some serial numbers were created, but some failed",
+                "product_name" => $input['product_name'],
+                "created_count" => $createdCount,
+                "failed_count" => $failedCount,
+                "created_products" => $createdProducts,
+                "errors" => $errors
+            ]);
             break;
             
         case 'PUT':

@@ -66,7 +66,7 @@ import {
 import { expandProductNameSerialPairs } from "./dashboard/productBatch";
 import { formatCurrency, formatDisplayDate, formatISODate } from "./dashboard/utils";
 
-const API_BASE_URL = "http://localhost/sun_computers/api";
+const API_BASE_URL = "http://cloud.anyrdp.in:3001/sun_computers/api";
 
 const createDefaultOrderForm = (): OrderForm => ({
   client_name: "",
@@ -1068,15 +1068,31 @@ const Dashboard = ({ onLogout }: DashboardProps) => {
     const shouldCreateAnother = !editMode && submitAction === "create_next";
 
     try {
-      const parseResult = editMode
-        ? { pairs: [{ productName: productForm.product_name, serialNumber: productForm.serial_number }] }
-        : expandProductNameSerialPairs(productForm.product_name, productForm.serial_number);
+      const formData = new FormData(e.currentTarget as HTMLFormElement);
+      const submittedProductNames = formData.getAll("product_name").map((value) => String(value ?? "").trim()).filter(Boolean);
+      const submittedSerialNumbers = formData.getAll("serial_number").map((value) => String(value ?? "").trim()).filter(Boolean);
+      const submittedProductForm = {
+        ...productForm,
+        product_name:
+          submittedProductNames.length > 0
+            ? submittedProductNames.join("\n")
+            : String(formData.get("product_name") ?? productForm.product_name ?? ""),
+        serial_number:
+          submittedSerialNumbers.length > 0
+            ? submittedSerialNumbers.join("\n")
+            : String(formData.get("serial_number") ?? productForm.serial_number ?? ""),
+      };
+
+      const parseResult = expandProductNameSerialPairs(
+        submittedProductForm.product_name,
+        submittedProductForm.serial_number,
+      );
       if (parseResult.error || parseResult.pairs.length === 0) {
         throw new Error(parseResult.error || "Product name is required");
       }
 
       const requestRows = parseResult.pairs.map((pair) => ({
-        ...productForm,
+        ...submittedProductForm,
         product_name: pair.productName,
         serial_number: pair.serialNumber,
       }));

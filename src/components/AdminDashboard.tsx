@@ -1370,7 +1370,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   const [newProduct, setNewProduct] = useState(getDefaultNewProduct);
   
   // API Configuration
-  const API_BASE_URL = "http://localhost/sun_computers/api";
+  const API_BASE_URL = "http://cloud.anyrdp.in:3001/sun_computers/api";
   
   // Check authentication and role
   useEffect(() => {
@@ -2718,9 +2718,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   };
   
   // Handle create product
-  const handleCreateProduct = async (options?: { keepOpen?: boolean }) => {
+  const handleCreateProduct = async (
+    options?: { keepOpen?: boolean; productOverride?: { product_name: string; serial_number: string } },
+  ) => {
     try {
-      const parseResult = expandProductNameSerialPairs(newProduct.product_name, newProduct.serial_number);
+      const productInput = {
+        product_name: options?.productOverride?.product_name ?? newProduct.product_name,
+        serial_number: options?.productOverride?.serial_number ?? newProduct.serial_number,
+      };
+      const parseResult = expandProductNameSerialPairs(productInput.product_name, productInput.serial_number);
       if (parseResult.error || parseResult.pairs.length === 0) {
         setError(parseResult.error || 'Product name is required');
         return;
@@ -4065,7 +4071,22 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     }
     const submitter = (e.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
     const submitAction = submitter?.value || 'create_close';
-    void handleCreateProduct({ keepOpen: submitAction === 'create_next' });
+    const formData = new FormData(e.currentTarget);
+    const submittedProductNames = formData.getAll('product_name').map((value) => String(value ?? '').trim()).filter(Boolean);
+    const submittedSerialNumbers = formData.getAll('serial_number').map((value) => String(value ?? '').trim()).filter(Boolean);
+    void handleCreateProduct({
+      keepOpen: submitAction === 'create_next',
+      productOverride: {
+        product_name:
+          submittedProductNames.length > 0
+            ? submittedProductNames.join('\n')
+            : String(formData.get('product_name') ?? newProduct.product_name ?? ''),
+        serial_number:
+          submittedSerialNumbers.length > 0
+            ? submittedSerialNumbers.join('\n')
+            : String(formData.get('serial_number') ?? newProduct.serial_number ?? ''),
+      },
+    });
   };
 
   void handleDeleteDelivery;

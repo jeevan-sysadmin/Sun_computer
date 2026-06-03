@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+Still import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   FiBox,
@@ -274,7 +274,7 @@ const ProductsTab = ({
             whileTap={{ scale: 0.98 }}
           >
             <FiPlus />
-            <span>Add New Product</span>
+            <span>Create New Product</span>
           </motion.button>
           <div className="filter-group">
             <select className="filter-select" value={filterStatus} onChange={(e) => onFilterStatusChange(e.target.value)}>

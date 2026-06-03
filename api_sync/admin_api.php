@@ -108,7 +108,70 @@ class AdminAPI {
             }
         }
 
+        if ((!array_key_exists('serial_number', $row) || trim((string)$row['serial_number']) === '')) {
+            $serialAliasKeys = ['serialNumber', 'serial_no', 'serialNo', 'serial'];
+            foreach ($serialAliasKeys as $aliasKey) {
+                if (isset($row[$aliasKey]) && trim((string)$row[$aliasKey]) !== '') {
+                    $row['serial_number'] = trim((string)$row[$aliasKey]);
+                    break;
+                }
+            }
+        } elseif (isset($row['serial_number'])) {
+            $row['serial_number'] = trim((string)$row['serial_number']);
+        }
+
         return $row;
+    }
+
+    private function splitSerialInputValues($value): array {
+        if ($value === null) {
+            return [];
+        }
+
+        $raw = trim((string)$value);
+        if ($raw === '') {
+            return [];
+        }
+
+        $parts = preg_split('/[\r\n]+/u', $raw);
+        if (!$parts) {
+            return [];
+        }
+
+        $serials = [];
+        $seen = [];
+        foreach ($parts as $part) {
+            $normalized = trim((string)$part);
+            if ($normalized === '') {
+                continue;
+            }
+            if (isset($seen[$normalized])) {
+                continue;
+            }
+            $seen[$normalized] = true;
+            $serials[] = $normalized;
+        }
+
+        return $serials;
+    }
+
+    private function expandProductRowsBySerial(array $row): array {
+        $serials = $this->splitSerialInputValues($row['serial_number'] ?? '');
+        if (count($serials) <= 1) {
+            if (count($serials) === 1) {
+                $row['serial_number'] = $serials[0];
+            }
+            return [$row];
+        }
+
+        $expanded = [];
+        foreach ($serials as $serial) {
+            $expandedRow = $row;
+            $expandedRow['serial_number'] = $serial;
+            $expanded[] = $expandedRow;
+        }
+
+        return $expanded;
     }
 
     private function syncOrderProducts(int $orderId, array $productIds, bool $isReplacement): void {
@@ -1553,15 +1616,17 @@ class AdminAPI {
                 }
 
                 $productName = trim((string)$row['product_name']);
-                $serialNumber = isset($row['serial_number']) ? preg_replace('/\s+/', '', trim((string)$row['serial_number'])) : '';
+                $serialNumber = trim((string)($row['serial_number'] ?? ''));
 
-                if ($serialNumber !== '') {
-                    $serialCheck = $this->conn->prepare("SELECT id FROM products WHERE serial_number = :serial_number LIMIT 1");
-                    $serialCheck->bindValue(':serial_number', $serialNumber, PDO::PARAM_STR);
-                    $serialCheck->execute();
-                    if ($serialCheck->fetch(PDO::FETCH_ASSOC)) {
-                        return ['success' => false, 'message' => 'Serial number already exists'];
-                    }
+                if ($serialNumber === '') {
+                    return ['success' => false, 'message' => 'Serial number is required'];
+                }
+
+                $serialCheck = $this->conn->prepare("SELECT id FROM products WHERE serial_number = :serial_number LIMIT 1");
+                $serialCheck->bindValue(':serial_number', $serialNumber, PDO::PARAM_STR);
+                $serialCheck->execute();
+                if ($serialCheck->fetch(PDO::FETCH_ASSOC)) {
+                    return ['success' => false, 'message' => 'Serial number already exists'];
                 }
 
                 $category = isset($row['category']) ? strtolower(trim((string)$row['category'])) : 'laptop';
@@ -1623,35 +1688,42 @@ class AdminAPI {
 
             $isBatch = isset($data['products']) && is_array($data['products']);
             if ($isBatch) {
-                $rows = $data['products'];
-                if (count($rows) === 0) {
+                $rawRows = $data['products'];
+                if (count($rawRows) === 0) {
                     http_response_code(400);
                     echo json_encode(['success' => false, 'message' => 'Products array is empty']);
                     return;
                 }
 
+                $rows = [];
                 $createdProducts = [];
                 $errors = [];
 
-                foreach ($rows as $index => $row) {
+                foreach ($rawRows as $index => $row) {
                     if (!is_array($row)) {
                         $errors[] = ['index' => $index, 'message' => 'Invalid row format'];
                         continue;
                     }
 
                     $normalizedRow = $this->normalizeProductPayload($row);
-                    $result = $insertProduct($normalizedRow);
+                    $normalizedRow['__source_index'] = $index;
+                    $rows[] = $normalizedRow;
+                }
+
+                foreach ($rows as $index => $row) {
+                    $sourceIndex = isset($row['__source_index']) ? (int)$row['__source_index'] : $index;
+                    $result = $insertProduct($row);
                     if (!empty($result['success'])) {
                         $createdProducts[] = [
-                            'index' => $index,
+                            'index' => $sourceIndex,
                             'product_name' => $result['product_name'],
                             'product_id' => $result['product_id'],
                             'product_code' => $result['product_code']
                         ];
                     } else {
                         $errors[] = [
-                            'index' => $index,
-                            'product_name' => isset($normalizedRow['product_name']) ? trim((string)$normalizedRow['product_name']) : '',
+                            'index' => $sourceIndex,
+                            'product_name' => isset($row['product_name']) ? trim((string)$row['product_name']) : '',
                             'message' => $result['message'] ?? 'Failed to create product'
                         ];
                     }
@@ -1731,7 +1803,7 @@ class AdminAPI {
             }
 
             $serialNumber = isset($data['serial_number'])
-                ? preg_replace('/\s+/', '', trim((string)$data['serial_number']))
+                ? trim((string)$data['serial_number'])
                 : (string)($existingProduct['serial_number'] ?? '');
 
             if ($serialNumber !== '') {

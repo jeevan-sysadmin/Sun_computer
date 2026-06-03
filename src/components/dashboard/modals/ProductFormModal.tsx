@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { motion } from "framer-motion";
+import { flushSync } from "react-dom";
 import {
   FiBox,
   FiCheckSquare,
@@ -17,7 +18,7 @@ import {
   FiZap,
 } from "react-icons/fi";
 import type { ProductForm } from "../types";
-import { splitBatchValues } from "../productBatch";
+import { splitBatchValues, splitSerialBatchValues } from "../productBatch";
 
 interface ProductFormModalProps {
   show: boolean;
@@ -72,7 +73,7 @@ const ProductFormModal = ({
   };
   const buildPairsFromForm = (): ProductIdentityPair[] => {
     const productNames = splitBatchValues(safeProductForm.product_name);
-    const serialNumbers = splitBatchValues(safeProductForm.serial_number);
+    const serialNumbers = splitSerialBatchValues(safeProductForm.serial_number);
     const pairCount = Math.max(productNames.length, serialNumbers.length, 1);
 
     return Array.from({ length: pairCount }, (_, index) => ({
@@ -87,10 +88,14 @@ const ProductFormModal = ({
   const serializePairsForSubmission = (pairs: ProductIdentityPair[]) => {
     const productNames: string[] = [];
     const serialNumbers: string[] = [];
+    let lastKnownProductName = "";
 
     pairs.forEach((pair) => {
       const productName = pair.productName.trim();
       const serialInput = pair.serialNumber.trim();
+      if (productName.length > 0) {
+        lastKnownProductName = productName;
+      }
 
       if (editMode) {
         if (productName.length > 0) productNames.push(productName);
@@ -98,11 +103,12 @@ const ProductFormModal = ({
         return;
       }
 
-      const serialEntries = splitBatchValues(serialInput);
+      const serialEntries = splitSerialBatchValues(serialInput);
       if (serialEntries.length > 0) {
-        if (productName.length > 0) {
+        const resolvedProductName = productName.length > 0 ? productName : lastKnownProductName;
+        if (resolvedProductName.length > 0) {
           serialEntries.forEach((serial) => {
-            productNames.push(productName);
+            productNames.push(resolvedProductName);
             serialNumbers.push(serial);
           });
         } else {
@@ -126,6 +132,14 @@ const ProductFormModal = ({
     window.setTimeout(() => {
       syncingLocalChangeRef.current = false;
     }, 0);
+  };
+
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+    // Ensure the parent form state has the latest product+serial values before submit.
+    flushSync(() => {
+      syncFormFromPairs(productPairs);
+    });
+    onSubmit(e);
   };
 
   useEffect(() => {
@@ -155,7 +169,7 @@ const ProductFormModal = ({
     if (!show || !wasVisibleRef.current || syncingLocalChangeRef.current) return;
 
     const externalNames = splitBatchValues(safeProductForm.product_name);
-    const externalSerials = splitBatchValues(safeProductForm.serial_number);
+    const externalSerials = splitSerialBatchValues(safeProductForm.serial_number);
     const { productNames: localNames, serialNumbers: localSerials } = serializePairsForSubmission(productPairs);
     const isSame =
       externalNames.length === localNames.length &&
@@ -220,7 +234,7 @@ const ProductFormModal = ({
   const productMeta =
     [safeProductForm.brand.trim(), safeProductForm.model.trim()].filter(Boolean).join(" - ") ||
     "Brand and model not added";
-  const serialEntries = splitBatchValues(safeProductForm.serial_number);
+  const serialEntries = splitSerialBatchValues(safeProductForm.serial_number);
   const serialValue =
     serialEntries.length > 0
       ? `${serialEntries.length} Serial Number${serialEntries.length > 1 ? "s" : ""}`
@@ -235,6 +249,20 @@ const ProductFormModal = ({
     safeProductForm.warranty_period,
     safeProductForm.price,
   ].filter((value) => value.trim().length > 0).length;
+  const unresolvedSerialPairCount =
+    !editMode
+      ? productPairs.reduce((count, pair, index) => {
+          const hasSerial = splitSerialBatchValues(pair.serialNumber).length > 0;
+          if (!hasSerial) return count;
+          const hasDirectName = pair.productName.trim().length > 0;
+          if (hasDirectName) return count;
+
+          const hasNameBefore = productPairs
+            .slice(0, index)
+            .some((entry) => entry.productName.trim().length > 0);
+          return hasNameBefore ? count : count + 1;
+        }, 0)
+      : 0;
 
   try {
     return (
@@ -279,7 +307,7 @@ const ProductFormModal = ({
             </motion.button>
           </div>
 
-          <form onSubmit={onSubmit} className="service-form-enhanced product-form-enhanced">
+          <form onSubmit={handleSubmit} className="service-form-enhanced product-form-enhanced">
             <div className="product-form-shell">
               <aside className="product-form-aside">
                 <div className="product-identity-card">
@@ -369,6 +397,7 @@ const ProductFormModal = ({
                               }}
                               type="text"
                               id={`product_name_${pair.id}`}
+                              name="product_name"
                               value={pair.productName}
                               onChange={(e) => handlePairChange(index, "productName", e.target.value)}
                               placeholder={`Product Name ${index + 1}`}
@@ -389,6 +418,7 @@ const ProductFormModal = ({
                                 if (index === 0) serialInputRef.current = element;
                               }}
                               id={`serial_number_${pair.id}`}
+                              name="serial_number"
                               value={pair.serialNumber}
                               onChange={(e) => handlePairChange(index, "serialNumber", e.target.value)}
                               placeholder={`Serial Number ${index + 1} (comma or new line for multiple)`}
@@ -398,7 +428,7 @@ const ProductFormModal = ({
                             />
                           </div>
                           <small className="product-field-help">
-                            Add multiple serial numbers in this box using comma, semicolon, or new line.
+                            Add multiple serial numbers using space, comma, semicolon, or new line.
                           </small>
                           <button
                             type="button"
@@ -623,6 +653,11 @@ const ProductFormModal = ({
 
             <div className="form-actions-enhanced product-form-actions">
               <div className="product-form-actions-note">Tip: use Create & Add Another for rapid sequential product entry.</div>
+              {!editMode && unresolvedSerialPairCount > 0 && (
+                <div className="product-form-actions-note">
+                  Add a Product Name before serial numbers for {unresolvedSerialPairCount} row(s).
+                </div>
+              )}
               <div className="product-form-actions-buttons">
                 <motion.button
                   type="button"
@@ -641,6 +676,7 @@ const ProductFormModal = ({
                     whileTap={{ scale: 0.98 }}
                     name="submit_action"
                     value="create_next"
+                    disabled={unresolvedSerialPairCount > 0}
                   >
                     <FiSave />
                     Create & Add Another
@@ -653,6 +689,7 @@ const ProductFormModal = ({
                   whileTap={{ scale: 0.98 }}
                   name="submit_action"
                   value={editMode ? "update" : "create_close"}
+                  disabled={!editMode && unresolvedSerialPairCount > 0}
                 >
                   <FiSave />
                   {editMode ? "Update Product" : "Create Product"}
@@ -677,7 +714,7 @@ const ProductFormModal = ({
               <FiX />
             </button>
           </div>
-          <form onSubmit={onSubmit} className="service-form-enhanced product-form-enhanced">
+          <form onSubmit={handleSubmit} className="service-form-enhanced product-form-enhanced">
             <div className="form-grid product-form-grid">
               <div className="form-group product-form-group">
                 <label htmlFor="product_name_fallback">Product Name *</label>
@@ -688,6 +725,16 @@ const ProductFormModal = ({
                   value={safeProductForm.product_name}
                   onChange={onChange}
                   required
+                />
+              </div>
+              <div className="form-group product-form-group">
+                <label htmlFor="serial_number_fallback">Serial Number</label>
+                <input
+                  id="serial_number_fallback"
+                  name="serial_number"
+                  className="product-input"
+                  value={safeProductForm.serial_number}
+                  onChange={onChange}
                 />
               </div>
               <div className="form-group product-form-group">

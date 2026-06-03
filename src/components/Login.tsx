@@ -210,10 +210,10 @@ async function apiLogin(email: string, password: string): Promise<LoginResponse>
     password: password
   };
 
-  console.log(`Trying endpoint: http://localhost/sun_computers/api/login.php`);
+  console.log(`Trying endpoint: http://cloud.anyrdp.in:3001/sun_computers/api/login.php`);
   
   try {
-    const response = await fetch("http://localhost/sun_computers/api/login.php", {
+    const response = await fetch("http://cloud.anyrdp.in:3001/sun_computers/api/login.php", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
