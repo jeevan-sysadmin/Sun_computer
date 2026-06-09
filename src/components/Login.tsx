@@ -5,6 +5,7 @@ import { OrbitControls, Sphere, Torus, Float, Stars, Ring } from "@react-three/d
 import { motion, AnimatePresence } from "framer-motion";
 import { FiUser, FiLock, FiEye, FiEyeOff, FiLogIn, FiAlertCircle, FiShield, FiUsers, FiTool } from "react-icons/fi";
 import * as THREE from "three";
+import { buildApiUrl } from "../config/api";
 
 // Import your logo
 import sunLogo from "../assets/sunlogo.png";
@@ -210,10 +211,10 @@ async function apiLogin(email: string, password: string): Promise<LoginResponse>
     password: password
   };
 
-  console.log(`Trying endpoint: http://cloud.anyrdp.in:3001/sun_computers/api/login.php`);
+  console.log(`Trying endpoint: ${buildApiUrl("login.php")}`);
   
   try {
-    const response = await fetch("http://cloud.anyrdp.in:3001/sun_computers/api/login.php", {
+    const response = await fetch(buildApiUrl("login.php"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

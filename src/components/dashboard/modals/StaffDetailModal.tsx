@@ -19,6 +19,7 @@ import {
   FiX,
 } from "react-icons/fi";
 import { exportStyledPdfReport } from "../pdfExport";
+import { API_BASE_URL } from "../../../config/api";
 
 interface StaffRecord {
   id: number;
@@ -78,7 +79,6 @@ interface StaffDetailModalProps {
   onViewOrders?: (staff: StaffRecord) => void;
 }
 
-const API_BASE_URL = "http://cloud.anyrdp.in:3001/sun_computers/api";
 const serviceTypes = ["general", "repair", "sales", "water", "inverter"];
 const expenseTypes = ["petrol", "travel", "food", "tools", "stationery", "others"];
 

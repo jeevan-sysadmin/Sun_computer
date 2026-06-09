@@ -2,6 +2,8 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
+const apiTarget = process.env.VITE_API_BASE_URL || 'http://localhost/sun_computers/api'
+
 export default defineConfig({
   plugins: [
     react({
@@ -24,7 +26,7 @@ export default defineConfig({
     // Proxy for API requests
     proxy: {
       '/api': {
-        target: 'http://cloud.anyrdp.in:3001/sun_computers/api',
+        target: apiTarget,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, '')
       }

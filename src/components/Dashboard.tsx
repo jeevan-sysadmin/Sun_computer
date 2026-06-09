@@ -65,8 +65,7 @@ import {
 } from "./dashboard/receiptUtils";
 import { expandProductNameSerialPairs } from "./dashboard/productBatch";
 import { formatCurrency, formatDisplayDate, formatISODate } from "./dashboard/utils";
-
-const API_BASE_URL = "http://cloud.anyrdp.in:3001/sun_computers/api";
+import { API_BASE_URL } from "../config/api";
 
 const createDefaultOrderForm = (): OrderForm => ({
   client_name: "",

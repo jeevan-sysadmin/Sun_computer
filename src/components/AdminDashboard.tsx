@@ -52,6 +52,7 @@ import { exportStyledPdfReport } from './dashboard/pdfExport';
 import { expandProductNameSerialPairs } from './dashboard/productBatch';
 import ConfirmDeleteModal from './dashboard/modals/ConfirmDeleteModal';
 import type { Order as DashboardOrder } from './dashboard/types';
+import { API_BASE_URL } from '../config/api';
 
 // Enhanced Type Definitions
 interface User {
@@ -1368,9 +1369,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
   });
 
   const [newProduct, setNewProduct] = useState(getDefaultNewProduct);
-  
-  // API Configuration
-  const API_BASE_URL = "http://cloud.anyrdp.in:3001/sun_computers/api";
   
   // Check authentication and role
   useEffect(() => {

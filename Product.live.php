@@ -68,7 +68,7 @@ function splitSerialNumbers($serialInput) {
 
 // Database class
 class Database {
-    private $host = "cloud.anyrdp.in:3001";
+    private $host = "localhost";
     private $db_name = "sun_computers";
     private $username = "root";
     private $password = "";
